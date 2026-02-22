@@ -7,7 +7,7 @@ telemetry, candidate matrix, and exploit replay.
 
 Usage:
     python dashboard/web_ui.py
-    Open http://localhost:8080
+    Open http://localhost:8888
 """
 
 import asyncio
@@ -170,7 +170,45 @@ async def run_simulated_cycle():
             "agent": "transform_engine",
             "detail": "libcst AST transforms: swap_validators, rename_ids, route_rotation...",
             "duration": 0.4,
-            "result": {"transforms_applied": 10, "failures": 0},
+            "result": {
+                "transforms_applied": 10,
+                "failures": 0,
+                "transform_type": "swap_validators",
+                "code_before": """@app.get('/data')
+async def get_data(path: str):
+    # No path validation
+    return open(path).read()
+
+@app.post('/run')
+async def run_cmd(cmd: str):
+    # Direct shell execution
+    result = subprocess.run(cmd, shell=True)
+    return {'result': result.stdout}
+
+def validate_input(val: str) -> bool:
+    # Weak validator — no sanitization
+    return len(val) > 0""",
+                "code_after": """@app.get('/data')
+async def get_data(path: str):
+    # Path confined to safe directory
+    safe = Path('/safe/data') / Path(path).name
+    if not safe.exists():
+        raise HTTPException(404)
+    return safe.read_text()
+
+@app.post('/run')
+async def run_cmd(cmd: str):
+    # Allowlist of permitted operations
+    ALLOWED = {'status', 'version'}
+    if cmd not in ALLOWED:
+        raise HTTPException(403)
+    result = subprocess.run(['app', cmd], shell=False)
+    return {'result': result.stdout}
+
+def validate_input_v2(val: str) -> bool:
+    # Strict regex — alphanumeric + dash only
+    return bool(re.match(r'^[a-zA-Z0-9\\-]{1,64}$', val))""",
+            },
         },
         {
             "step": 4,
@@ -325,24 +363,38 @@ async def api_stats():
 @app.post("/api/defend")
 async def api_defend():
     cycle_id = await run_simulated_cycle()
-    return JSONResponse({"status": "ok", "cycle_id": cycle_id})
+    # Return fresh stats so the caller can update the UI even without WebSocket
+    events = load_telemetry()
+    stats = compute_stats(events)
+    return JSONResponse({"status": "ok", "cycle_id": cycle_id, "stats": stats})
 
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     ws_clients.append(ws)
+    logger.info("WebSocket client connected (total: %d)", len(ws_clients))
     try:
         while True:
             data = await ws.receive_text()
-            msg = json.loads(data)
+            try:
+                msg = json.loads(data)
+            except json.JSONDecodeError:
+                logger.warning("Bad JSON from WebSocket client: %s", data[:100])
+                continue
             if msg.get("action") == "defend":
+                logger.info("Defense cycle triggered via WebSocket")
                 asyncio.create_task(run_simulated_cycle())
             elif msg.get("action") == "ping":
                 await ws.send_json({"type": "pong"})
     except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.error("WebSocket error: %s", e)
+    finally:
         if ws in ws_clients:
             ws_clients.remove(ws)
+        logger.info("WebSocket client disconnected (total: %d)", len(ws_clients))
 
 
 # ── Main HTML ────────────────────────────────────────────────────────────────
@@ -817,6 +869,83 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .toast.success { border-color: var(--accent2); }
   .toast.error { border-color: var(--danger); }
 
+  /* Code Diff Viewer */
+  .diff-panel {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1px;
+    background: #0d1520;
+    margin-top: 8px;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .diff-side {
+    background: var(--bg3);
+    padding: 0;
+    position: relative;
+  }
+  .diff-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 12px;
+    font-size: 10px;
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    border-bottom: 1px solid var(--border);
+  }
+  .diff-header.old-header { background: #ff475715; color: var(--danger); border-bottom-color: #ff475733; }
+  .diff-header.new-header { background: #00ff8815; color: var(--accent2); border-bottom-color: #00ff8833; }
+  .diff-code {
+    padding: 12px;
+    margin: 0;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 11.5px;
+    line-height: 1.7;
+    overflow-x: auto;
+    white-space: pre;
+    max-height: 280px;
+    overflow-y: auto;
+    color: var(--text);
+    background: transparent;
+  }
+  .diff-code::-webkit-scrollbar { width: 4px; height: 4px; }
+  .diff-code::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  .diff-line-old  { color: #ff8080; background: #ff475710; display: block; }
+  .diff-line-new  { color: #80ffb0; background: #00ff8810; display: block; }
+  .diff-line-ctx  { color: var(--text2); display: block; }
+  .diff-empty {
+    padding: 40px;
+    text-align: center;
+    color: var(--text2);
+    font-size: 11px;
+  }
+  .diff-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: bold;
+  }
+  .diff-badge-transform {
+    background: #00d4ff18;
+    color: var(--accent);
+    border: 1px solid #00d4ff33;
+  }
+  .diff-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    font-size: 10px;
+    color: var(--text2);
+    border-top: 1px solid var(--border);
+    background: var(--bg2);
+  }
+
   /* Footer */
   .footer {
     padding: 8px 24px;
@@ -998,6 +1127,28 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- Full width: Code Mutation Diff Viewer -->
+  <div class="panel full-width">
+    <div class="panel-title"><span class="icon">&#9903;</span> Code Mutation Diff &mdash; Old vs New</div>
+    <div id="diff-transform-label" style="font-size:10px;color:var(--text2);margin-bottom:8px;">Waiting for defense cycle&hellip;</div>
+    <div class="diff-panel">
+      <div class="diff-side">
+        <div class="diff-header old-header">&#8722; Before Mutation <span id="diff-old-lines"></span></div>
+        <pre class="diff-code" id="diff-old"><div class="diff-empty">Run a defense cycle to see the original code here.</div></pre>
+      </div>
+      <div class="diff-side">
+        <div class="diff-header new-header">&#43; After Mutation <span id="diff-new-lines"></span></div>
+        <pre class="diff-code" id="diff-new"><div class="diff-empty">Run a defense cycle to see the mutated code here.</div></pre>
+      </div>
+    </div>
+    <div class="diff-meta" id="diff-meta" style="display:none;">
+      <span>Transform:</span>
+      <span class="diff-badge diff-badge-transform" id="diff-transform-type"></span>
+      <span>&#x2502;</span>
+      <span id="diff-stats"></span>
+    </div>
+  </div>
+
   <!-- Full width: Cycle History -->
   <div class="panel full-width">
     <div class="panel-title"><span class="icon">&#9200;</span> Defense Cycle History</div>
@@ -1120,6 +1271,9 @@ function handleStepResult(msg) {
   const r = msg.result;
   if (!r) return;
 
+  if (msg.step === 3 && r.code_before && r.code_after) {
+    renderCodeDiff(r.code_before, r.code_after, r.transform_type);
+  }
   if (msg.step === 4 && r.candidates) {
     // Verification results
     renderCandidates(r.candidates, 'verify');
@@ -1136,6 +1290,63 @@ function handleStepResult(msg) {
   if (msg.step === 1) {
     updateExploitBadges(false);
   }
+}
+
+// ── Code Diff Renderer ──────────────────────────────────────────────────────
+function renderCodeDiff(codeBefore, codeAfter, transformType) {
+  const oldEl = document.getElementById('diff-old');
+  const newEl = document.getElementById('diff-new');
+  const label = document.getElementById('diff-transform-label');
+  const meta  = document.getElementById('diff-meta');
+  const typeEl = document.getElementById('diff-transform-type');
+  const statsEl = document.getElementById('diff-stats');
+  const oldLinesEl = document.getElementById('diff-old-lines');
+  const newLinesEl = document.getElementById('diff-new-lines');
+
+  const oldLines = codeBefore.split('\\n');
+  const newLines = codeAfter.split('\\n');
+
+  // Build highlighted spans for old side (mark lines that differ)
+  const oldSet = new Set(oldLines);
+  const newSet = new Set(newLines);
+
+  oldEl.innerHTML = oldLines.map(l => {
+    const cls = newSet.has(l) ? 'diff-line-ctx' : 'diff-line-old';
+    return `<span class="${cls}">${escHtml(l)}</span>`;
+  }).join('\\n');
+
+  newEl.innerHTML = newLines.map(l => {
+    const cls = oldSet.has(l) ? 'diff-line-ctx' : 'diff-line-new';
+    return `<span class="${cls}">${escHtml(l)}</span>`;
+  }).join('\\n');
+
+  const changedOld = oldLines.filter(l => !newSet.has(l)).length;
+  const changedNew = newLines.filter(l => !oldSet.has(l)).length;
+
+  oldLinesEl.textContent = `(${oldLines.length} lines, -${changedOld} changed)`;
+  newLinesEl.textContent = `(${newLines.length} lines, +${changedNew} changed)`;
+
+  label.textContent = `Transform applied at ${new Date().toLocaleTimeString()}`;
+  typeEl.textContent = transformType || 'unknown';
+  statsEl.textContent = `-${changedOld} removed  +${changedNew} added`;
+  meta.style.display = 'flex';
+
+  // Scroll both sides to top
+  oldEl.scrollTop = 0;
+  newEl.scrollTop = 0;
+
+  // Animate in
+  [oldEl, newEl].forEach(el => {
+    el.style.opacity = '0';
+    requestAnimationFrame(() => {
+      el.style.transition = 'opacity 0.4s';
+      el.style.opacity = '1';
+    });
+  });
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/[<]/g,'&lt;').replace(/[>]/g,'&gt;');
 }
 
 function renderCandidates(candidates, phase) {
@@ -1346,11 +1557,47 @@ function buildArchDiagram() {
 // ── Trigger defense ─────────────────────────────────────────────────────────
 function triggerDefend() {
   if (cycleRunning) return;
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({action: 'defend'}));
-  } else {
-    fetch('/api/defend', {method: 'POST'});
-  }
+  const btn = document.getElementById('btn-defend');
+  btn.disabled = true;
+  cycleRunning = true;
+  addLog('system', 'Defense cycle triggered — running pipeline...', 'warn');
+  showToast('Defense cycle running...', 'info');
+  resetPipeline();
+
+  // Always use HTTP to trigger the cycle (reliable).
+  // WebSocket will still receive live step-by-step broadcasts.
+  fetch('/api/defend', {method: 'POST'})
+    .then(r => r.json())
+    .then(data => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        // No WebSocket — manually update UI from HTTP response
+        addLog('system', `Cycle ${data.cycle_id} completed`, 'success');
+        showToast('Deployed successfully — ' + data.cycle_id, 'success');
+        if (data.stats) {
+          document.getElementById('m-cycles').textContent = data.stats.total_cycles;
+          document.getElementById('m-before').textContent = (data.stats.exploit_before * 100).toFixed(0) + '%';
+          document.getElementById('m-after').textContent = (data.stats.exploit_after * 100).toFixed(0) + '%';
+          document.getElementById('m-latency').textContent = data.stats.avg_cycle_s + 's';
+          document.getElementById('m-candidates').textContent = data.stats.total_candidates;
+        }
+        // Mark all pipeline nodes complete
+        for (let i=1;i<=6;i++) {
+          const node = document.getElementById('pipe-' + i);
+          node.className = 'pipeline-node complete';
+          if (i<6) document.getElementById('arrow-' + i).className = 'pipeline-arrow lit';
+        }
+        updateExploitBadges(true);
+      }
+      refreshStats();
+    })
+    .catch(err => {
+      addLog('system', 'Defense cycle failed: ' + err, 'error');
+      showToast('Defense cycle failed', 'error');
+    })
+    .finally(() => {
+      cycleRunning = false;
+      btn.disabled = false;
+    });
 }
 
 // ── Refresh stats from API ──────────────────────────────────────────────────
