@@ -90,8 +90,9 @@ services:
     command: >
       --model ${VLLM_MODEL:-microsoft/phi-2}
       --dtype float16
-      --max-model-len 4096
+      --max-model-len 2048
       --tensor-parallel-size ${VLLM_TP_SIZE:-1}
+      --enforce-eager
     deploy:
       resources:
         reservations:

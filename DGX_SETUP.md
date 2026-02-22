@@ -122,8 +122,11 @@ RAPIDS is the GPU DataFrame library. Install it on the host for running Python s
 
 ```bash
 # Recommended: use the RAPIDS conda installer
-wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
-bash Miniconda3-latest-Linux-x86_64.sh -b -p $HOME/miniconda3
+# NOTE: DGX Spark uses ARM (aarch64) — do NOT use the x86_64 installer!
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-aarch64.sh
+# If /home/$USER/miniconda3 already exists from a failed attempt, clean it first:
+# rm -rf $HOME/miniconda3
+bash Miniconda3-latest-Linux-aarch64.sh -b -p $HOME/miniconda3
 source $HOME/miniconda3/bin/activate
 
 # Create a RAPIDS environment (CUDA 12.x, Python 3.11)
