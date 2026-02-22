@@ -1,0 +1,32 @@
+name: "mutation-planner"
+backend: "python"
+max_batch_size: 32
+
+input [
+  {
+    name: "INPUT"
+    data_type: TYPE_BYTES
+    dims: [ -1 ]
+  }
+]
+
+output [
+  {
+    name: "OUTPUT"
+    data_type: TYPE_BYTES
+    dims: [ -1 ]
+  }
+]
+
+dynamic_batching {
+  preferred_batch_size: [ 4, 8, 16 ]
+  max_queue_delay_microseconds: 5000
+}
+
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]

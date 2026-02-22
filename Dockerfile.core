@@ -1,0 +1,22 @@
+# ZeroWall Core Engine — Dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# System dependencies for libcst, bandit, httpx
+RUN apt-get update && apt-get install -y \
+    gcc g++ git curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.core.txt .
+RUN pip install --no-cache-dir -r requirements.core.txt
+
+COPY core/ ./core/
+COPY apps/ ./apps/
+COPY scripts/ ./scripts/
+
+ENV PYTHONPATH=/app
+
+EXPOSE 9000
+
+CMD ["python", "-m", "core.orchestrator.api_server"]
