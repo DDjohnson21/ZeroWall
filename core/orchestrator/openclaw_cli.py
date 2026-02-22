@@ -165,7 +165,7 @@ def cmd_benchmark(
     burst_size: int = typer.Option(50, help="Number of burst requests"),
     concurrency: int = typer.Option(8, help="Concurrent workers"),
     target_url: str = typer.Option("http://localhost:8000", help="Target URL"),
-    with_defense: bool = typer.Option(False, help="Include defense cycle timing"),
+    with_defense: bool = typer.Option(False, "--with-defense/--no-with-defense", help="Include defense cycle timing"),
 ):
     """🔥 Run burst benchmark mode and output metrics."""
     console.print(Panel(
