@@ -1,0 +1,22 @@
+fastapi==0.109.2
+uvicorn[standard]==0.27.1
+httpx==0.26.0
+requests==2.31.0
+# Safe AST/CST transforms
+libcst==1.2.0
+# CLI
+rich==13.7.0
+typer==0.9.0
+# Testing
+pytest==8.0.2
+pytest-asyncio==0.23.5
+# Static analysis
+bandit==1.7.7
+# Triton client
+tritonclient[http,grpc]==2.42.0
+# RAPIDS fallback
+pandas==2.2.0
+# Telemetry
+python-dateutil==2.8.2
+# Scoring
+numpy==1.26.4

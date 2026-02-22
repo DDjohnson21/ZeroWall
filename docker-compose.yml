@@ -1,0 +1,160 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ZeroWall — Docker Compose Orchestration
+# All services needed for a full local demo on DGX Spark
+# ─────────────────────────────────────────────────────────────────────────────
+
+version: "3.9"
+
+networks:
+  zerowall-net:
+    driver: bridge
+
+volumes:
+  triton-model-repo:
+  telemetry-data:
+  deploy-artifacts:
+
+services:
+
+  # ── 1. Target App (Original Vulnerable Version) ──────────────────────────
+  target-app:
+    build:
+      context: ./apps/target-fastapi
+      dockerfile: Dockerfile
+    container_name: zerowall-target-v1
+    networks:
+      - zerowall-net
+    ports:
+      - "${TARGET_PORT:-8000}:8000"
+    environment:
+      - APP_VERSION=${APP_VERSION:-v1.0.0-ORIGINAL}
+      - DEPLOY_HASH=${DEPLOY_HASH:-aabbcc001122}
+      - PORT=8000
+    volumes:
+      - deploy-artifacts:/artifacts
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    labels:
+      - "zerowall.role=target"
+      - "zerowall.variant=original"
+
+  # ── 2. Triton Inference Server ────────────────────────────────────────────
+  triton:
+    image: nvcr.io/nvidia/tritonserver:24.01-py3
+    container_name: zerowall-triton
+    networks:
+      - zerowall-net
+    ports:
+      - "${TRITON_HTTP_PORT:-8080}:8000"
+      - "${TRITON_GRPC_PORT:-8081}:8001"
+      - "${TRITON_METRICS_PORT:-8082}:8002"
+    volumes:
+      - ./inference/triton-model-repo:/models
+    command: >
+      tritonserver
+      --model-repository=/models
+      --allow-gpu-metrics=true
+      --log-verbose=1
+      --strict-model-config=false
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    labels:
+      - "zerowall.role=inference"
+      - "zerowall.component=triton"
+
+  # ── 3. vLLM Inference Server (local LLM runtime) ─────────────────────────
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: zerowall-vllm
+    networks:
+      - zerowall-net
+    ports:
+      - "${VLLM_PORT:-8088}:8000"
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+    volumes:
+      - ${MODEL_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
+    command: >
+      --model ${VLLM_MODEL:-microsoft/phi-2}
+      --dtype float16
+      --max-model-len 4096
+      --tensor-parallel-size ${VLLM_TP_SIZE:-1}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+    labels:
+      - "zerowall.role=inference"
+      - "zerowall.component=vllm"
+
+  # ── 4. ZeroWall Core Engine ───────────────────────────────────────────────
+  zerowall-core:
+    build:
+      context: .
+      dockerfile: Dockerfile.core
+    container_name: zerowall-core
+    networks:
+      - zerowall-net
+    ports:
+      - "${OPENCLAW_PORT:-9000}:9000"
+    environment:
+      - TRITON_HOST=triton
+      - TRITON_HTTP_PORT=8000
+      - VLLM_HOST=vllm
+      - VLLM_PORT=8000
+      - TARGET_HOST=target-app
+      - TARGET_PORT=8000
+      - RAPIDS_ENABLED=${RAPIDS_ENABLED:-true}
+    volumes:
+      - ./core:/app/core
+      - ./apps:/app/apps
+      - telemetry-data:/app/telemetry_data
+      - deploy-artifacts:/app/artifacts
+    depends_on:
+      target-app:
+        condition: service_healthy
+    labels:
+      - "zerowall.role=core"
+
+  # ── 5. Streamlit Dashboard ────────────────────────────────────────────────
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: zerowall-dashboard
+    networks:
+      - zerowall-net
+    ports:
+      - "${DASHBOARD_PORT:-8501}:8501"
+    environment:
+      - ZEROWALL_CORE_HOST=zerowall-core
+      - ZEROWALL_CORE_PORT=9000
+      - TELEMETRY_DATA_PATH=/app/telemetry_data
+    volumes:
+      - telemetry-data:/app/telemetry_data
+      - deploy-artifacts:/app/artifacts
+    depends_on:
+      - zerowall-core
+    labels:
+      - "zerowall.role=dashboard"

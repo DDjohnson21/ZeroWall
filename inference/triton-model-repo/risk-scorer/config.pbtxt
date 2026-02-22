@@ -1,0 +1,32 @@
+name: "risk-scorer"
+backend: "python"
+max_batch_size: 64
+
+input [
+  {
+    name: "INPUT"
+    data_type: TYPE_BYTES
+    dims: [ -1 ]
+  }
+]
+
+output [
+  {
+    name: "OUTPUT"
+    data_type: TYPE_BYTES
+    dims: [ -1 ]
+  }
+]
+
+dynamic_batching {
+  preferred_batch_size: [ 8, 16, 32 ]
+  max_queue_delay_microseconds: 2000
+}
+
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]
