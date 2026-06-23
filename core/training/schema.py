@@ -67,7 +67,7 @@ class RankedTransformPlan:
     this into N concrete candidates, biased toward the top of the ranking.
     """
     choices: List[TransformChoice] = field(default_factory=list)
-    source_tier: str = "unknown"   # nemo | triton | deterministic
+    source_tier: str = "unknown"   # nemo | learned | triton | deterministic
     model: str = "unknown"
     raw: Optional[str] = None
 

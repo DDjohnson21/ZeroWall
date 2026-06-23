@@ -25,7 +25,13 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent.parent.parent
 DEPLOY_DIR = BASE_DIR / "artifacts" / "deploy"
-ACTIVE_PATH = BASE_DIR / "apps" / "target-fastapi" / "main.py"
+# The pristine, git-tracked vulnerable app — treated as the immutable "v1
+# original". We never overwrite it, so demos are repeatable and the baseline is
+# always recoverable.
+ORIGINAL_PATH = BASE_DIR / "apps" / "target-fastapi" / "main.py"
+# The live, ZeroWall-managed deployment artifact. The hardened winner is written
+# here; a production runner serves this path (see scripts/run_demo.sh).
+ACTIVE_PATH = DEPLOY_DIR / "active" / "main.py"
 VERSIONS_DIR = DEPLOY_DIR / "versions"
 ACTIVE_SYMLINK = DEPLOY_DIR / "active"
 VERSION_MANIFEST = DEPLOY_DIR / "manifest.json"
@@ -34,6 +40,7 @@ VERSION_MANIFEST = DEPLOY_DIR / "manifest.json"
 def _ensure_dirs():
     DEPLOY_DIR.mkdir(parents=True, exist_ok=True)
     VERSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    ACTIVE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
 class DeployController:
@@ -45,6 +52,10 @@ class DeployController:
     def __init__(self, target_source_path: Path = ACTIVE_PATH):
         self.target_source = target_source_path
         _ensure_dirs()
+        # Seed the live deployment artifact from the pristine original on first
+        # run so the managed app always has something to serve.
+        if self.target_source == ACTIVE_PATH and not ACTIVE_PATH.exists() and ORIGINAL_PATH.exists():
+            shutil.copy(str(ORIGINAL_PATH), str(ACTIVE_PATH))
         self._manifest = self._load_manifest()
 
     def deploy(

@@ -1,0 +1,19 @@
+{
+  "version": "v1",
+  "kind": "logistic-regression",
+  "trained_at": "2026-06-23T01:15:39",
+  "features": [
+    "security_score",
+    "correctness_score"
+  ],
+  "n_examples": 72,
+  "epochs": 2000,
+  "final_loss": 0.105241,
+  "train_accuracy": 0.9583,
+  "train_seconds": 0.026,
+  "weights": {
+    "security_score": 5.595000743865967,
+    "correctness_score": 1.8651634454727173,
+    "bias": -4.85661675147712
+  }
+}

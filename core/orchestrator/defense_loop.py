@@ -37,10 +37,14 @@ from core.agents.exploit_agent import ExploitAgent
 from core.agents.verifier_agent import VerifierAgent
 from core.agents.risk_agent import RiskAgent, RiskAssessment
 from core.agents.explanation_agent import ExplanationAgent
+from core.deploy.controller import DeployController
+from core.training.feedback import FeedbackRecorder
 from core.transforms.base import apply_transform
+from core.sandbox.runner import CandidateSandbox
 from core.telemetry.collector import TelemetryCollector
 from inference.clients.triton_client import TritonClient
 from inference.clients.vllm_client import VLLMClient
+from inference.clients.nemo_planner_client import NeMoPlannerClient
 
 # Auto-register transforms
 import core.transforms.rename_identifiers  # noqa
@@ -67,6 +71,8 @@ class DefenseLoop:
         triton_port: int = 8080,
         vllm_host: str = "localhost",
         vllm_port: int = 8088,
+        planner_llm_host: Optional[str] = None,
+        planner_llm_port: Optional[int] = None,
         candidate_count: int = 10,
         workers: int = 4,
         telemetry: Optional[TelemetryCollector] = None,
@@ -74,20 +80,31 @@ class DefenseLoop:
         # Inference clients
         self.triton = TritonClient(host=triton_host, port=triton_port)
         self.vllm = VLLMClient(host=vllm_host, port=vllm_port)
+        # Tier-1 planner: NeMo LoRA-fine-tuned LLM (served via vLLM/TRT-LLM).
+        # Defaults to the vLLM endpoint; skipped automatically until an adapter
+        # is trained and the endpoint is healthy.
+        self.nemo_planner = NeMoPlannerClient(
+            host=planner_llm_host or vllm_host,
+            port=planner_llm_port or vllm_port,
+        )
 
         # Agents
         self.mutation_agent = MutationAgent(
             triton_client=self.triton,
             candidate_count=candidate_count,
+            nemo_planner=self.nemo_planner,
         )
         self.exploit_agent = ExploitAgent(base_url=target_url, workers=workers)
         self.verifier_agent = VerifierAgent(run_bandit=True)
         self.risk_agent = RiskAgent(triton_client=self.triton)
         self.explanation_agent = ExplanationAgent(vllm_client=self.vllm)
+        self.deploy_controller = DeployController()
+        self.feedback_recorder = FeedbackRecorder()
 
         self.telemetry = telemetry or TelemetryCollector()
         self.target_url = target_url
         self.candidate_count = candidate_count
+        self.workers = workers
         self._active_version_hash: str = "aabbcc001122"
         self._active_source: str = TARGET_SOURCE_PATH.read_text() if TARGET_SOURCE_PATH.exists() else ""
         self._cycles: List[DefenseCycle] = []
@@ -231,11 +248,26 @@ class DefenseLoop:
                 assessment.winner_id.encode()
             ).hexdigest()[:12]
 
-        # ── Generate explanation ──────────────────────────────────────────
+        # ── Hot-swap the winning variant (action == deploy) ───────────────
         winner = next(
             (c for c in cycle.candidates if c.candidate_id == assessment.winner_id),
-            None
+            None,
         )
+        if cycle.action == "deploy" and winner is not None and winner.mutated_code:
+            try:
+                record = self.deploy_controller.deploy(winner, cycle_id)
+                cycle.deploy_hash = record["content_hash"]
+                # Advance the moving target: the next cycle mutates from the
+                # already-hardened source, so defenses compound over time.
+                self._active_source = winner.mutated_code
+                self._active_version_hash = record["content_hash"]
+                self.telemetry.record("deploy_version", record["version_id"], cycle_id=cycle_id)
+                logger.info(f"[DefenseLoop] 🚀 Deployed {record['version_id']}")
+            except Exception as e:
+                logger.error(f"[DefenseLoop] Deploy failed: {e}")
+                cycle.action = "reject"
+
+        # ── Generate explanation ──────────────────────────────────────────
         t_exp = time.time()
         explanation = self.explanation_agent.explain(cycle, assessment, winner, before_rate)
         cycle.explanation_inference_latency_ms = (time.time() - t_exp) * 1000
@@ -249,6 +281,13 @@ class DefenseLoop:
         self.telemetry.record("cycle_action", cycle.action, cycle_id=cycle_id)
         self.telemetry.record("risk_latency_ms", risk_latency_ms, cycle_id=cycle_id)
         self._cycles.append(cycle)
+
+        # ── Closed-loop feedback: turn this outcome into training labels ───
+        try:
+            n = self.feedback_recorder.record_cycle(cycle)
+            self.telemetry.record("feedback_examples", n, cycle_id=cycle_id)
+        except Exception as e:
+            logger.warning(f"[DefenseLoop] feedback recording failed: {e}")
 
         logger.info(f"\n{'='*60}")
         logger.info(f"[DefenseLoop] 🏁 Cycle {cycle_id[:8]} complete in {cycle.cycle_latency_s:.2f}s")
@@ -269,12 +308,47 @@ class DefenseLoop:
         return list(await asyncio.gather(*tasks))
 
     async def _parallel_exploit(self, candidates: List[CandidateResult]) -> List[CandidateResult]:
-        """Replay exploits against all passing candidates in parallel."""
-        tasks = [
-            self.exploit_agent.replay_against_candidate(c, self.target_url)
-            for c in candidates
-        ]
+        """
+        Replay exploits against each candidate's *own* code.
+
+        Every candidate is booted in an isolated sandbox server running its
+        mutated source, and the exploit payloads are fired at that server.
+        This is what lets a hardened variant actually demonstrate that it
+        blocks the exploit — replaying against the static production app would
+        make all candidates look identical.
+        """
+        sem = asyncio.Semaphore(max(1, self.workers))
+        tasks = [self._exploit_candidate_sandboxed(c, sem) for c in candidates]
         return list(await asyncio.gather(*tasks))
+
+    async def _exploit_candidate_sandboxed(
+        self,
+        candidate: CandidateResult,
+        sem: asyncio.Semaphore,
+    ) -> CandidateResult:
+        """Boot one candidate in a sandbox, attack it, tear it down."""
+        loop = asyncio.get_event_loop()
+        async with sem:
+            sandbox = CandidateSandbox(candidate.mutated_code or self._active_source)
+            try:
+                await loop.run_in_executor(None, sandbox.start)
+                if not sandbox.ready:
+                    # A candidate that cannot even serve traffic is not a valid
+                    # hardening — treat it as fully vulnerable so it never wins.
+                    candidate.exploit_attempts = len(self.exploit_agent.payloads)
+                    candidate.exploit_successes = candidate.exploit_attempts
+                    candidate.exploit_failures = 0
+                    candidate.exploit_success_rate = 1.0
+                    logger.warning(
+                        f"[DefenseLoop] {candidate.candidate_id} failed to boot; "
+                        f"marking fully vulnerable"
+                    )
+                    return candidate
+                return await self.exploit_agent.replay_against_candidate(
+                    candidate, sandbox.base_url
+                )
+            finally:
+                await loop.run_in_executor(None, sandbox.stop)
 
     def get_status(self) -> Dict[str, Any]:
         """Return current state for OpenClaw CLI status command."""
@@ -288,4 +362,7 @@ class DefenseLoop:
             "last_winner": last.winner_id if last else None,
             "triton_healthy": self.triton.is_healthy(),
             "vllm_healthy": self.vllm.is_healthy(),
+            "nemo_planner_active": self.nemo_planner.available,
+            "nemo_adapter_present": self.nemo_planner.adapter_present,
+            "last_planner_tier": self.mutation_agent.last_source_tier,
         }

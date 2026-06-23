@@ -79,6 +79,46 @@ def defend(req: DefendRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/analytics")
+def analytics():
+    """RAPIDS cuDF (pandas-fallback) telemetry summary for the dashboard."""
+    try:
+        from core.telemetry.rapids_analytics import RapidsAnalytics
+        return RapidsAnalytics().get_full_summary()
+    except Exception as e:
+        logger.warning(f"Analytics failed: {e}")
+        return {"error": str(e), "rapids_backend": "unavailable"}
+
+
+@app.get("/planner")
+def planner():
+    """Mutation Planner cascade status: which tiers are live + last tier used."""
+    try:
+        loop = get_defense_loop()
+        learned = loop.mutation_agent.learned_planner
+        return {
+            "tiers": [
+                {
+                    "tier": 1,
+                    "name": "nemo-lora-llm",
+                    "active": loop.nemo_planner.available,
+                    "adapter_present": loop.nemo_planner.adapter_present,
+                },
+                {
+                    "tier": 2,
+                    "name": "learned-mlp",
+                    "active": bool(learned and learned.available),
+                    "trained_at": (learned.meta or {}).get("trained_at"),
+                },
+                {"tier": 3, "name": "triton-served", "active": loop.triton.is_healthy()},
+                {"tier": 4, "name": "deterministic", "active": True},
+            ],
+            "last_tier_used": loop.mutation_agent.last_source_tier,
+        }
+    except Exception as e:
+        return {"error": str(e), "tiers": []}
+
+
 @app.get("/cycles")
 def cycles():
     try:
