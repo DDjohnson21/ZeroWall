@@ -14,10 +14,15 @@ legitimate inputs. The key difference is structural — moving target.
 This is the primary HARDENING transform for the vulnerable endpoints.
 """
 
+import logging
+import textwrap
+
 import libcst as cst
 from typing import Dict, Any, Sequence
 from core.transforms.base import BaseTransformer, register_transform
 from core.models import TransformType
+
+logger = logging.getLogger(__name__)
 
 
 # Hardened version of the /data endpoint body (safe allowlist version)
@@ -31,6 +36,8 @@ _DATA_ENDPOINT_HARDENED = '''
 '''
 
 _RUN_ENDPOINT_HARDENED = '''
+    body = await request.json()
+    cmd = body.get("cmd", "")
     ALLOWED_COMMANDS = {"hello", "date", "uptime", "whoami"}
     if cmd not in ALLOWED_COMMANDS:
         raise HTTPException(status_code=400, detail="Command not in allowlist")
@@ -82,16 +89,23 @@ class _ValidatorSwapper(cst.CSTTransformer):
 
         hardened_body = self.VULNERABLE_FUNCTIONS[matched_name]
         try:
-            # Parse the hardened body as a module, extract statements
-            wrapped = f"async def _tmp():\n"
-            for line in hardened_body.strip().split("\n"):
-                wrapped += f"    {line}\n"
+            # Normalise the snippet's indentation, then re-indent it one level
+            # so it parses as a function body. The snippet carries its own
+            # nested indentation (if/raise/return), so it MUST be dedented to a
+            # common baseline before re-indenting — otherwise nested lines drift
+            # and the parse fails (this previously made the transform a no-op).
+            body = textwrap.dedent(hardened_body).strip("\n")
+            # async wrapper so snippets may use `await` (e.g. request.json()).
+            wrapped = "async def _tmp():\n" + textwrap.indent(body, "    ") + "\n"
             parsed = cst.parse_module(wrapped)
             new_body_stmts = parsed.body[0].body.body  # type: ignore
 
             new_body = updated_node.body.with_changes(body=new_body_stmts)
             return updated_node.with_changes(body=new_body)
-        except Exception:
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(
+                "[swap_validators] failed to harden %s: %s", func_name, e
+            )
             return updated_node
 
 

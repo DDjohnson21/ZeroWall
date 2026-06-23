@@ -62,9 +62,15 @@ class RiskAgent:
         logger.info(f"[RiskAgent] Assessing {len(candidates)} candidates")
         t_start = time.time()
 
+        # Decide once per cycle whether the Triton-served risk model is reachable,
+        # rather than health-checking per candidate.
+        use_triton = bool(self.triton_client) and self.triton_client.is_healthy()
+        if use_triton:
+            logger.info("[RiskAgent] scoring via Triton-served risk-scorer model")
+
         scored = []
         for candidate in candidates:
-            score = self._score_candidate(candidate)
+            score = self._score_candidate(candidate, use_triton=use_triton)
             candidate.confidence_score = score
             candidate.risk_score = 1.0 - score
             scored.append((candidate.candidate_id, score, candidate))
@@ -124,8 +130,39 @@ class RiskAgent:
             ranked_candidates=ranked,
         )
 
-    def _score_candidate(self, candidate: CandidateResult) -> float:
-        """Compute confidence score for a single candidate."""
+    def _score_candidate(
+        self, candidate: CandidateResult, use_triton: bool = False
+    ) -> float:
+        """Compute confidence score for a single candidate.
+
+        Prefers the Triton-served risk model (trained logistic regression) when
+        reachable; otherwise falls back to the local formula below.
+        """
+        if use_triton:
+            try:
+                total_tests = (
+                    candidate.tests_passed + candidate.tests_failed + candidate.tests_errors
+                )
+                resp = self.triton_client.infer(
+                    model_name="risk-scorer",
+                    inputs={
+                        "exploit_success_rate": candidate.exploit_success_rate,
+                        "tests_passed": candidate.tests_passed,
+                        "total_tests": max(total_tests, 1),
+                        "bandit_issues": candidate.bandit_issues,
+                        "model_confidence": candidate.plan.model_confidence,
+                    },
+                )
+                score = resp.get("confidence_score")
+                if score is not None:
+                    return max(0.0, min(1.0, float(score)))
+            except Exception as e:
+                logger.warning(f"[RiskAgent] Triton scoring failed, using formula: {e}")
+
+        return self._score_candidate_formula(candidate)
+
+    def _score_candidate_formula(self, candidate: CandidateResult) -> float:
+        """Local fallback score (used when Triton risk-scorer is unreachable)."""
         # Security: how often does exploit fail?
         security_score = 1.0 - candidate.exploit_success_rate
 

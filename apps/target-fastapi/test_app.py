@@ -114,12 +114,23 @@ class TestDataEndpoint:
         response = client.get("/data?file=readme.txt")
         assert response.status_code == 200
 
-    def test_unknown_file_returns_response(self):
-        """V1 behavior: unknown file returns a response (not error) — simulates info leak."""
+    def test_unknown_file_handled_safely(self):
+        """Behavior contract: an unknown / non-allowlisted file must NOT leak real content.
+
+        Two acceptable outcomes (both preserve legitimate behavior):
+          - v1 (vulnerable): 200 with a simulated "not found" response (info leak surface)
+          - hardened: 4xx block (allowlist rejected the request)
+
+        A hardened ZeroWall variant is expected to tighten this path, so the
+        oracle accepts either, but never a leak of real file content.
+        """
         response = client.get("/data?file=unknown.txt")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["file"] == "unknown.txt"
+        assert response.status_code in (200, 400, 403)
+        if response.status_code == 200:
+            data = response.json()
+            assert data["file"] == "unknown.txt"
+            # Must not have leaked content for a file that does not exist.
+            assert "CONFIDENTIAL" not in str(data)
 
     def test_data_missing_param_returns_422(self):
         response = client.get("/data")
@@ -154,18 +165,28 @@ class TestRunEndpoint:
         data = response.json()
         assert data["output"] == "demouser"
 
-    def test_unknown_cmd_returns_response(self):
-        """V1 behavior: unknown cmd returns a descriptive response — simulates injection probe surface."""
+    def test_unknown_cmd_handled_safely(self):
+        """Behavior contract: a non-allowlisted command must never be executed.
+
+        Acceptable outcomes:
+          - v1 (vulnerable): 200 with status "unknown" (probe surface)
+          - hardened: 4xx block (command not in allowlist)
+        Never an actual "success" execution of the injected command.
+        """
         response = client.post("/run", json={"cmd": "rm -rf /"})
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "unknown"
+        assert response.status_code in (200, 400, 403)
+        if response.status_code == 200:
+            data = response.json()
+            assert data["status"] != "success"
 
     def test_run_missing_body_field(self):
+        """Empty command: either echoed harmlessly (v1) or rejected (hardened)."""
         response = client.post("/run", json={})
-        assert response.status_code == 200
-        data = response.json()
-        assert data["cmd"] == ""
+        assert response.status_code in (200, 400, 422)
+        if response.status_code == 200:
+            data = response.json()
+            assert data["cmd"] == ""
+            assert data.get("status") != "success"
 
 
 # ─── Search Endpoint (simulated SQLi surface) ────────────────────────────────

@@ -159,3 +159,21 @@ services:
       - zerowall-core
     labels:
       - "zerowall.role=dashboard"
+
+  # ── 6. Next.js Operator Dashboard ─────────────────────────────────────────
+  dashboard-next:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: zerowall-dashboard-next
+    networks:
+      - zerowall-net
+    ports:
+      - "${DASHBOARD_NEXT_PORT:-3000}:3000"
+    environment:
+      # Server-side rewrite target (browser calls /api/* → Core API).
+      - ZEROWALL_API_URL=http://zerowall-core:9000
+    depends_on:
+      - zerowall-core
+    labels:
+      - "zerowall.role=dashboard-next"
