@@ -17,6 +17,7 @@ import logging
 import subprocess
 import tempfile
 import shutil
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -104,7 +105,7 @@ class VerifierAgent:
         """Run pytest in the given directory. Returns (passed, failed, errors)."""
         try:
             result = subprocess.run(
-                ["python", "-m", "pytest", "test_app.py", "-v", "--tb=no", "-q",
+                [sys.executable, "-m", "pytest", "test_app.py", "-v", "--tb=no", "-q",
                  "--no-header"],
                 cwd=str(work_dir),
                 capture_output=True,
@@ -134,7 +135,7 @@ class VerifierAgent:
         """Run bandit and return number of issues found. 0 = clean."""
         try:
             result = subprocess.run(
-                ["python", "-m", "bandit", str(source_file), "-q", "-ll"],
+                [sys.executable, "-m", "bandit", str(source_file), "-q", "-ll"],
                 capture_output=True,
                 text=True,
                 timeout=15,
@@ -148,4 +149,4 @@ class VerifierAgent:
             return 0 if result.returncode == 0 else 1
         except Exception as e:
             logger.warning(f"[VerifierAgent] bandit error: {e}")
-            return 0
+            return 1

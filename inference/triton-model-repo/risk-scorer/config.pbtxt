@@ -6,7 +6,7 @@ input [
   {
     name: "INPUT"
     data_type: TYPE_STRING
-    dims: [ -1 ]
+    dims: [ 1 ]
   }
 ]
 
@@ -14,7 +14,7 @@ output [
   {
     name: "OUTPUT"
     data_type: TYPE_STRING
-    dims: [ -1 ]
+    dims: [ 1 ]
   }
 ]
 
@@ -26,7 +26,8 @@ dynamic_batching {
 instance_group [
   {
     count: 1
-    kind: KIND_GPU
-    gpus: [ 0 ]
+    # These tiny NumPy policies are CPU instances; DGX GPU work is handled by
+    # vLLM and RAPIDS. Triton still provides batching and model lifecycle.
+    kind: KIND_CPU
   }
 ]

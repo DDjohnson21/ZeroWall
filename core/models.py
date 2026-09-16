@@ -84,6 +84,10 @@ class DefenseCycle:
     winner_id: Optional[str] = None
     deploy_hash: Optional[str] = None
     action: str = "pending"   # deploy | reject | rollback
+    baseline_exploit_rate: float = 0.0
+    active_exploit_rate: float = 0.0
+    deployment_verified: bool = False
+    deployment_error: Optional[str] = None
 
     # Timing
     cycle_start: float = field(default_factory=time.time)

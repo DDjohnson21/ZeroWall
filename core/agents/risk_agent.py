@@ -97,17 +97,14 @@ class RiskAgent:
                 break
 
         if winner_id is None:
-            # Check if original was better (all candidates failed → rollback)
-            if all(c.exploit_success_rate >= 0.8 for c in candidates):
-                action = "rollback"
-                reasoning = (
-                    f"All {len(candidates)} candidates remain vulnerable "
-                    f"(exploit success rate ≥80%). Recommending rollback to last known safe version."
-                )
+            action = "reject"
+            if not ranked:
+                reasoning = "No valid candidates were produced; leaving the active version unchanged."
             else:
                 reasoning = (
                     f"No candidate reached confidence threshold of {self.deploy_threshold:.0%}. "
-                    f"Best was {ranked[0][0]} at {ranked[0][1]:.1%}. Rejecting all."
+                    f"Best was {ranked[0][0]} at {ranked[0][1]:.1%}. "
+                    "Leaving the active version unchanged."
                 )
         else:
             reasoning = (

@@ -1,113 +1,111 @@
 """
-ZeroWall — Deployment Controller
-==================================
-Manages blue/green deployment of mutation candidates.
+ZeroWall deployment controller.
 
-Responsibilities:
-- Write winning candidate code to active deployment path
-- Track version hash and metadata
-- Run post-deploy exploit gate check
-- Rollback to last known good version if gate fails
-- Emit deployment events to telemetry
+Writes immutable version artifacts, atomically switches the managed active source,
+and keeps enough transaction metadata to perform an immediate verified rollback.
 """
 
 import hashlib
 import json
 import logging
-import shutil
+import os
+import tempfile
 import time
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
-from core.models import CandidateResult, DefenseCycle
+from core.models import CandidateResult
 
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent.parent.parent
-DEPLOY_DIR = BASE_DIR / "artifacts" / "deploy"
-# The pristine, git-tracked vulnerable app — treated as the immutable "v1
-# original". We never overwrite it, so demos are repeatable and the baseline is
-# always recoverable.
+DEFAULT_DEPLOY_DIR = BASE_DIR / "artifacts" / "deploy"
 ORIGINAL_PATH = BASE_DIR / "apps" / "target-fastapi" / "main.py"
-# The live, ZeroWall-managed deployment artifact. The hardened winner is written
-# here; a production runner serves this path (see scripts/run_demo.sh).
-ACTIVE_PATH = DEPLOY_DIR / "active" / "main.py"
-VERSIONS_DIR = DEPLOY_DIR / "versions"
-ACTIVE_SYMLINK = DEPLOY_DIR / "active"
-VERSION_MANIFEST = DEPLOY_DIR / "manifest.json"
 
 
-def _ensure_dirs():
-    DEPLOY_DIR.mkdir(parents=True, exist_ok=True)
-    VERSIONS_DIR.mkdir(parents=True, exist_ok=True)
-    ACTIVE_PATH.parent.mkdir(parents=True, exist_ok=True)
+def _hash_bytes(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()[:16]
+
+
+def _atomic_write(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
 
 
 class DeployController:
-    """
-    Controls deployment of hardened candidate variants.
-    Uses an active symlink + versioned copy strategy.
-    """
+    """Manage the versioned source slot consumed by the live target runner."""
 
-    def __init__(self, target_source_path: Path = ACTIVE_PATH):
-        self.target_source = target_source_path
-        _ensure_dirs()
-        # Seed the live deployment artifact from the pristine original on first
-        # run so the managed app always has something to serve.
-        if self.target_source == ACTIVE_PATH and not ACTIVE_PATH.exists() and ORIGINAL_PATH.exists():
-            shutil.copy(str(ORIGINAL_PATH), str(ACTIVE_PATH))
-        self._manifest = self._load_manifest()
-
-    def deploy(
+    def __init__(
         self,
-        candidate: CandidateResult,
-        cycle_id: str,
-    ) -> Dict[str, Any]:
-        """
-        Deploy the winning candidate.
+        target_source_path: Optional[Path] = None,
+        deploy_dir: Optional[Path] = None,
+        original_path: Path = ORIGINAL_PATH,
+    ):
+        self.deploy_dir = Path(
+            deploy_dir or os.environ.get("ZEROWALL_DEPLOY_DIR") or DEFAULT_DEPLOY_DIR
+        )
+        self.active_path = Path(
+            target_source_path or (self.deploy_dir / "active" / "main.py")
+        )
+        self.target_source = self.active_path
+        self.versions_dir = self.deploy_dir / "versions"
+        self.manifest_path = self.deploy_dir / "manifest.json"
+        self.active_pointer = self.deploy_dir / "active.txt"
+        self.original_path = Path(original_path)
 
-        1. Write mutated code to a versioned file
-        2. Archive the current active version
-        3. Switch active symlink to new version
-        4. Update manifest
-        5. Return deployment record
+        self.versions_dir.mkdir(parents=True, exist_ok=True)
+        self.active_path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.active_path.exists() and self.original_path.exists():
+            _atomic_write(self.active_path, self.original_path.read_bytes())
 
-        Args:
-            candidate: The winning mutation candidate
-            cycle_id: Defense cycle ID for tracing
-        """
+        self._manifest = self._load_manifest()
+        if not self.manifest_path.exists():
+            self._save_manifest()
+
+    def _initial_manifest(self) -> Dict[str, Any]:
+        active_hash = (
+            _hash_bytes(self.active_path.read_bytes())
+            if self.active_path.exists()
+            else "missing"
+        )
+        return {
+            "active_hash": active_hash,
+            "active_version_id": "original",
+            "previous_hash": None,
+            "previous_version_id": None,
+            "history": [],
+        }
+
+    def deploy(self, candidate: CandidateResult, cycle_id: str) -> Dict[str, Any]:
+        """Atomically publish a candidate and return its rollback transaction."""
         if not candidate.mutated_code:
             raise ValueError("Cannot deploy candidate with no mutated code")
 
-        logger.info(f"[DeployController] Deploying {candidate.candidate_id}")
-        t_start = time.time()
-
-        # Compute content hash for this version
-        content_hash = hashlib.sha256(
-            candidate.mutated_code.encode()
-        ).hexdigest()[:16]
+        started = time.time()
+        new_content = candidate.mutated_code.encode("utf-8")
+        content_hash = _hash_bytes(new_content)
         version_id = f"v-{content_hash}"
-        version_path = VERSIONS_DIR / f"{version_id}.py"
+        version_path = self.versions_dir / f"{version_id}.py"
 
-        # Write versioned copy
-        version_path.write_text(candidate.mutated_code, encoding="utf-8")
+        current_content = self.active_path.read_bytes()
+        previous_hash = _hash_bytes(current_content)
+        previous_version_id = self._manifest.get("active_version_id", "original")
+        previous_path = self.versions_dir / f"v-{previous_hash}.py"
 
-        # Archive current active
-        previous_hash = self._manifest.get("active_hash", "unknown")
-        previous_path = VERSIONS_DIR / f"prev-{previous_hash}.py"
-        if self.target_source.exists() and not previous_path.exists():
-            shutil.copy(str(self.target_source), str(previous_path))
+        if not previous_path.exists():
+            _atomic_write(previous_path, current_content)
+        if not version_path.exists():
+            _atomic_write(version_path, new_content)
 
-        # Deploy: copy versioned code to active path
-        shutil.copy(str(version_path), str(self.target_source))
-
-        # Update active symlink pointer
-        active_ptr = ACTIVE_SYMLINK.with_suffix(".txt")
-        active_ptr.write_text(version_id)
-
-        deploy_latency_ms = (time.time() - t_start) * 1000
-
-        # Update manifest
         record = {
             "version_id": version_id,
             "content_hash": content_hash,
@@ -115,60 +113,124 @@ class DeployController:
             "transform_type": candidate.plan.transform_type.value,
             "cycle_id": cycle_id,
             "deployed_at": time.time(),
-            "deploy_latency_ms": deploy_latency_ms,
+            "deploy_latency_ms": 0.0,
             "tests_passed": candidate.tests_passed,
             "exploit_success_rate": candidate.exploit_success_rate,
             "confidence_score": candidate.confidence_score,
+            "previous_hash": previous_hash,
+            "previous_version_id": previous_version_id,
+            "post_deploy_verified": False,
         }
+
+        _atomic_write(self.active_path, new_content)
+        record["deploy_latency_ms"] = (time.time() - started) * 1000
+
+        self._manifest["previous_hash"] = previous_hash
+        self._manifest["previous_version_id"] = previous_version_id
         self._manifest["active_hash"] = content_hash
         self._manifest["active_version_id"] = version_id
         self._manifest.setdefault("history", []).append(record)
         self._save_manifest()
+        _atomic_write(self.active_pointer, version_id.encode("utf-8"))
 
         logger.info(
-            f"[DeployController] ✅ Deployed {version_id} "
-            f"in {deploy_latency_ms:.1f}ms"
+            "[DeployController] published %s in %.1fms; awaiting live gate",
+            version_id,
+            record["deploy_latency_ms"],
         )
         return record
 
-    def rollback(self) -> Dict[str, Any]:
-        """Rollback to the previous deployed version."""
-        history = self._manifest.get("history", [])
-        if len(history) < 2:
-            logger.warning("[DeployController] No previous version to rollback to")
-            return {"status": "no_previous_version"}
-
-        prev_record = history[-2]
-        prev_hash = prev_record["content_hash"]
-        prev_path = VERSIONS_DIR / f"v-{prev_hash}.py"
-
-        if not prev_path.exists():
-            logger.error(f"[DeployController] Previous version file not found: {prev_path}")
-            return {"status": "rollback_failed", "reason": "version_file_missing"}
-
-        shutil.copy(str(prev_path), str(self.target_source))
-        self._manifest["active_hash"] = prev_hash
-        self._manifest["active_version_id"] = prev_record["version_id"]
+    def confirm(self, record: Dict[str, Any], live_exploit_rate: float) -> None:
+        """Mark a published version as proven live and safe."""
+        for item in reversed(self._manifest.get("history", [])):
+            if item.get("cycle_id") == record.get("cycle_id"):
+                item["post_deploy_verified"] = True
+                item["live_exploit_success_rate"] = live_exploit_rate
+                item["verified_at"] = time.time()
+                break
         self._save_manifest()
 
-        logger.info(f"[DeployController] ⏪ Rolled back to {prev_record['version_id']}")
-        return {"status": "rolled_back", "version": prev_record["version_id"]}
+    def rollback(self, deployment: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Atomically restore the exact version preceding a deployment."""
+        previous_hash = (
+            deployment.get("previous_hash") if deployment else None
+        ) or self._manifest.get("previous_hash")
+        previous_version_id = (
+            deployment.get("previous_version_id") if deployment else None
+        ) or self._manifest.get("previous_version_id")
+
+        if not previous_hash:
+            return {"status": "no_previous_version"}
+
+        previous_path = self.versions_dir / f"v-{previous_hash}.py"
+        if not previous_path.exists():
+            return {
+                "status": "rollback_failed",
+                "reason": "version_file_missing",
+                "path": str(previous_path),
+            }
+
+        _atomic_write(self.active_path, previous_path.read_bytes())
+        self._manifest["active_hash"] = previous_hash
+        self._manifest["active_version_id"] = previous_version_id or f"v-{previous_hash}"
+        self._manifest["previous_hash"] = None
+        self._manifest["previous_version_id"] = None
+        self._manifest.setdefault("history", []).append(
+            {
+                "event": "rollback",
+                "rolled_back_at": time.time(),
+                "restored_hash": previous_hash,
+                "restored_version_id": self._manifest["active_version_id"],
+                "failed_cycle_id": (deployment or {}).get("cycle_id"),
+            }
+        )
+        self._save_manifest()
+        _atomic_write(
+            self.active_pointer,
+            str(self._manifest["active_version_id"]).encode("utf-8"),
+        )
+        logger.warning(
+            "[DeployController] rolled back to %s",
+            self._manifest["active_version_id"],
+        )
+        return {
+            "status": "rolled_back",
+            "version": self._manifest["active_version_id"],
+            "content_hash": previous_hash,
+        }
 
     def get_status(self) -> Dict[str, Any]:
-        """Return current deployment status."""
         return {
             "active_version_id": self._manifest.get("active_version_id", "unknown"),
             "active_hash": self._manifest.get("active_hash", "unknown"),
-            "total_deployments": len(self._manifest.get("history", [])),
+            "total_deployments": sum(
+                1
+                for item in self._manifest.get("history", [])
+                if item.get("version_id")
+            ),
+            "last_deploy_verified": next(
+                (
+                    item.get("post_deploy_verified", False)
+                    for item in reversed(self._manifest.get("history", []))
+                    if item.get("version_id")
+                ),
+                False,
+            ),
         }
 
     def _load_manifest(self) -> Dict[str, Any]:
-        if VERSION_MANIFEST.exists():
+        if self.manifest_path.exists():
             try:
-                return json.loads(VERSION_MANIFEST.read_text())
-            except Exception:
-                pass
-        return {"active_hash": "original", "active_version_id": "original", "history": []}
+                data = json.loads(self.manifest_path.read_text())
+                if isinstance(data, dict):
+                    data.setdefault("history", [])
+                    return data
+            except (OSError, ValueError):
+                logger.warning("[DeployController] ignoring invalid manifest")
+        return self._initial_manifest()
 
     def _save_manifest(self) -> None:
-        VERSION_MANIFEST.write_text(json.dumps(self._manifest, indent=2))
+        _atomic_write(
+            self.manifest_path,
+            json.dumps(self._manifest, indent=2).encode("utf-8"),
+        )

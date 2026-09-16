@@ -94,16 +94,16 @@ def compute_stats(events: List[Dict]) -> Dict[str, Any]:
         return sum(lst) / len(lst) if lst else 0.0
 
     baseline = vals("baseline_exploit_rate")
-    cand_rates = vals("candidate_exploit_rate")
+    cand_rates = vals("active_exploit_rate")
     cycle_lats = vals("cycle_latency_s")
     cand_counts = vals("candidate_count")
-    mut_lats = vals("mutation_latency_ms")
-    risk_lats = vals("risk_latency_ms")
+    mut_lats = vals("mutation_inference_latency_ms")
+    risk_lats = vals("risk_inference_latency_ms")
     cand_conf = vals("candidate_confidence")
 
     actions = {}
     for e in events:
-        if e.get("metric") == "cycle_action":
+        if e.get("metric") == "action":
             a = e.get("value", "unknown")
             actions[a] = actions.get(a, 0) + 1
 
@@ -303,18 +303,18 @@ def validate_input_v2(val: str) -> bool:
     telemetry_events = [
         {"timestamp": time.time(), "metric": "baseline_exploit_rate", "value": 1.0, "cycle_id": cycle_id},
         {"timestamp": time.time(), "metric": "mutation_count", "value": 10, "cycle_id": cycle_id},
-        {"timestamp": time.time(), "metric": "mutation_latency_ms", "value": 600, "cycle_id": cycle_id},
+        {"timestamp": time.time(), "metric": "mutation_inference_latency_ms", "value": 600, "cycle_id": cycle_id},
         {"timestamp": time.time(), "metric": "candidates_passing_tests", "value": 8, "cycle_id": cycle_id},
         {"timestamp": time.time(), "metric": "candidates_blocking_exploits", "value": 6, "cycle_id": cycle_id},
         {"timestamp": time.time(), "metric": "cycle_latency_s", "value": total_s, "cycle_id": cycle_id},
-        {"timestamp": time.time(), "metric": "cycle_action", "value": "deploy", "cycle_id": cycle_id},
-        {"timestamp": time.time(), "metric": "risk_latency_ms", "value": 300, "cycle_id": cycle_id},
+        {"timestamp": time.time(), "metric": "action", "value": "deploy", "cycle_id": cycle_id},
+        {"timestamp": time.time(), "metric": "risk_inference_latency_ms", "value": 300, "cycle_id": cycle_id},
         {"timestamp": time.time(), "metric": "candidate_count", "value": 10, "cycle_id": cycle_id},
     ]
     for i in range(6):
         telemetry_events.append({
             "timestamp": time.time(),
-            "metric": "candidate_exploit_rate",
+            "metric": "active_exploit_rate",
             "value": 0.0 if i < 4 else 0.2,
             "cycle_id": cycle_id,
             "candidate_id": f"candidate-{cycle_id}-{i:03d}",

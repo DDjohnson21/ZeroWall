@@ -3,8 +3,6 @@
 # All services needed for a full local demo on DGX Spark
 # ─────────────────────────────────────────────────────────────────────────────
 
-version: "3.9"
-
 networks:
   zerowall-net:
     driver: bridge
@@ -30,6 +28,8 @@ services:
       - APP_VERSION=${APP_VERSION:-v1.0.0-ORIGINAL}
       - DEPLOY_HASH=${DEPLOY_HASH:-aabbcc001122}
       - PORT=8000
+      - ZEROWALL_DEPLOY_DIR=/artifacts/deploy
+      - ZEROWALL_RESET_ON_START=${ZEROWALL_RESET_ON_START:-true}
     volumes:
       - deploy-artifacts:/artifacts
     healthcheck:
@@ -127,6 +127,7 @@ services:
       - TARGET_HOST=target-app
       - TARGET_PORT=8000
       - RAPIDS_ENABLED=${RAPIDS_ENABLED:-true}
+      - ZEROWALL_DEPLOY_DIR=/app/artifacts/deploy
     volumes:
       - ./core:/app/core
       - ./apps:/app/apps

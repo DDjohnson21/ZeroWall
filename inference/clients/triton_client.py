@@ -70,7 +70,7 @@ class TritonClient:
             "inputs": [
                 {
                     "name": "INPUT",
-                    "shape": [1, len(input_bytes)],
+                    "shape": [1, 1],
                     "datatype": "BYTES",
                     "data": [input_bytes.decode("utf-8")],
                 }

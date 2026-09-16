@@ -152,7 +152,7 @@ def compute_analytics(events: list) -> Dict[str, Any]:
                 return []
 
         baseline_rates = metric_vals("baseline_exploit_rate")
-        candidate_rates = metric_vals("candidate_exploit_rate")
+        candidate_rates = metric_vals("active_exploit_rate")
         cycle_latencies = metric_vals("cycle_latency_s")
         candidate_counts = metric_vals("candidate_count")
 
@@ -166,7 +166,7 @@ def compute_analytics(events: list) -> Dict[str, Any]:
             "avg_cycle_s": safe_avg(cycle_latencies),
             "total_cycles": len(cycle_latencies),
             "total_candidates": int(sum(candidate_counts)) if candidate_counts else 0,
-            "rolling_exploit": [round(r, 4) for r in baseline_rates[-20:]],
+            "rolling_exploit": [round(r, 4) for r in candidate_rates[-20:]],
             "cycle_latencies": cycle_latencies,
         }
     except Exception as e:
@@ -263,8 +263,8 @@ inf_col1, inf_col2, inf_col3 = st.columns(3)
 def get_metric_vals(events, metric_name):
     return [e["value"] for e in events if e.get("metric") == metric_name and isinstance(e.get("value"), (int, float))]
 
-mutation_lats = get_metric_vals(events, "mutation_latency_ms")
-risk_lats = get_metric_vals(events, "risk_latency_ms")
+mutation_lats = get_metric_vals(events, "mutation_inference_latency_ms")
+risk_lats = get_metric_vals(events, "risk_inference_latency_ms")
 
 with inf_col1:
     avg_mut = sum(mutation_lats) / len(mutation_lats) if mutation_lats else 0

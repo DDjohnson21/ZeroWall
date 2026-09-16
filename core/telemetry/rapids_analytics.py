@@ -102,7 +102,7 @@ class RapidsAnalytics:
 
         try:
             baseline_mask = df["metric"] == "baseline_exploit_rate"
-            candidate_mask = df["metric"] == "candidate_exploit_rate"
+            candidate_mask = df["metric"] == "active_exploit_rate"
 
             before_rates = df[baseline_mask]["value"].astype(float)
             after_rates = df[candidate_mask]["value"].astype(float)
@@ -196,7 +196,7 @@ class RapidsAnalytics:
             return []
 
         try:
-            mask = df["metric"] == "baseline_exploit_rate"
+            mask = df["metric"] == "active_exploit_rate"
             rates = df[mask].sort_values("timestamp")["value"].astype(float)
             # Rolling mean (manual for cuDF compat)
             vals = list(rates)

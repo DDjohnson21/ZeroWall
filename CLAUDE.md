@@ -16,7 +16,7 @@ pip install -r requirements.core.txt
 cd apps/target-fastapi && pip install -r requirements.txt && cd ../..
 
 # Run the target app (the attack surface) standalone
-cd apps/target-fastapi && uvicorn main:app --port 8000
+bash scripts/run_target.sh
 
 # Target app tests — these are the SAME tests the Verifier Agent runs per candidate
 cd apps/target-fastapi && pytest                    # all tests

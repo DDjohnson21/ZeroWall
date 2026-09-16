@@ -102,7 +102,7 @@ class TritonPythonModel:
         responses = []
         for request in requests:
             in_tensor = pb_utils.get_input_tensor_by_name(request, "INPUT")
-            raw = in_tensor.as_numpy()[0].decode("utf-8")
+            raw = in_tensor.as_numpy()[0, 0].decode("utf-8")
             try:
                 ctx = json.loads(raw)
             except Exception:
@@ -121,11 +121,11 @@ class TritonPythonModel:
                 "transform_scores": scores,
                 "recommended_sequence": seq,
                 "model": model_name,
-                "backend": "triton-python",
+                "backend": "triton-python-numpy-cpu",
                 "trained": self._trained,
             }
             out_bytes = json.dumps(result).encode("utf-8")
-            out_tensor = pb_utils.Tensor("OUTPUT", np.array([out_bytes], dtype=object))
+            out_tensor = pb_utils.Tensor("OUTPUT", np.array([[out_bytes]], dtype=object))
             responses.append(pb_utils.InferenceResponse(output_tensors=[out_tensor]))
         return responses
 

@@ -1,7 +1,8 @@
-# 🛡️ ZeroWall — AI Moving Target Defense on NVIDIA DGX Spark
+# 🛡️ ZeroWall — AI-Guided Adaptive Self-Hardening on NVIDIA DGX Spark
 
-> **NVIDIA DGX Spark Hackathon Submission**
-> Autonomous, GPU-accelerated AI security that detects attacks, generates hardened code variants, and deploys winning candidates — all locally on DGX Spark.
+> [!IMPORTANT]
+> **Hackathon proof of concept — not production security software.**
+> ZeroWall demonstrates a safe, local adaptive-hardening workflow on NVIDIA DGX Spark. Its vulnerabilities, attacks, and deployments target only the included simulated FastAPI application. Do not expose the demo services to untrusted networks or use them to protect production systems.
 
 ---
 
@@ -15,12 +16,13 @@
 - [Benchmark Evidence](#benchmark)
 - [Screenshot Checklist](#screenshots)
 - [Disclaimer](#disclaimer)
+- [License](#license)
 
 ---
 
 ## Overview
 
-ZeroWall is a **multi-agent AI Moving Target Defense (MTD) system** that runs entirely on NVIDIA DGX Spark.
+ZeroWall is an **MTD-inspired, multi-agent adaptive self-hardening system** that runs entirely on NVIDIA DGX Spark. It selects from audited transformations; it never lets a model write arbitrary source code.
 
 When an attack is detected, ZeroWall:
 1. Generates **8–20 behavior-preserving code mutation candidates** via a safe deterministic transformer
@@ -29,13 +31,13 @@ When an attack is detected, ZeroWall:
 4. **Scores risk** using a weighted confidence model (served via Triton)
 5. **Deploys the winning variant** and rolls back if post-deploy checks fail
 
-The attack surface keeps moving. Attackers can't re-use the same exploit.
+Every published version combines an audited security guard with a distinct structural layout. The live gate proves the new worker loaded the exact artifact, preserves normal traffic, and blocks replayed attacks before the deployment is accepted.
 
 ---
 
 ## Problem Statement
 
-Static defenses fail against adaptive attackers. Patch cycles are slow. ZeroWall makes the defenders' codebase a **moving target** — automatically, continuously, and safely.
+Static defenses fail against adaptive attackers and manual patch cycles are slow. ZeroWall demonstrates a constrained response loop: detect, propose audited variants, test, attack, score, publish, verify live, and automatically restore the previous artifact on failure.
 
 ---
 
@@ -84,9 +86,9 @@ Static defenses fail against adaptive attackers. Patch cycles are slow. ZeroWall
 ## NVIDIA Stack Usage <a name="nvidia-stack"></a>
 
 ### 1. 🖥️ Triton Inference Server
-**What we use it for:** Serving two GPU-accelerated model endpoints:
+**What we use it for:** Serving two small, dynamically batched policy endpoints:
 - `mutation-planner` — selects transform types for each defense cycle
-- `risk-scorer` — scores candidate confidence with batched GPU inference
+- `risk-scorer` — scores candidate confidence with batched inference
 
 **Evidence in code:**
 - `inference/triton-model-repo/mutation-planner/config.pbtxt` + `1/model.py`
@@ -128,14 +130,14 @@ Static defenses fail against adaptive attackers. Patch cycles are slow. ZeroWall
 
 ## NVIDIA Requirement Mapping <a name="requirement-mapping"></a>
 
-### Why this is NOT laptop-friendly
+### Why DGX Spark is the production-performance path
 | Reason | Detail |
 |--------|--------|
-| Triton GPU models | Requires `KIND_GPU` instance groups — CUDA mandatory |
+| Triton model serving | Reproducible model lifecycle and dynamic batching; the current tiny NumPy policies run on CPU |
 | vLLM LLM inference | Requires GPU; float16 models won't fit in CPU RAM |
-| RAPIDS cuDF | CUDA 12+ required; no CPU fallback for real cuDF |
-| Parallel agent execution | 8–20 candidates + parallel exploit replay saturates GPU |
-| Benchmark mode | 50+ concurrent HTTP requests + defense cycle timing requires NVLINK bandwidth |
+| RAPIDS cuDF | Uses CUDA for production analytics, with a pandas development fallback |
+| Local LLM reasoning | vLLM runs the optional explanation/planner LLM locally on the DGX GPU |
+| Parallel evaluation | Candidate tests and isolated HTTP replay benefit from DGX capacity but also run in CPU development mode |
 
 ### NVIDIA Components Used
 | Component | Role | Evidence |
@@ -183,9 +185,9 @@ open http://localhost:8501
 
 ### Step-by-Step Manual Demo
 ```bash
-# 1. Start target app (standalone, no Docker)
-cd apps/target-fastapi
-uvicorn main:app --port 8000 &
+# 1. Start the managed target (standalone, no Docker)
+# This serves artifacts/deploy/active/main.py and reloads atomic deployments.
+bash scripts/run_target.sh &
 
 # 2. Verify normal request
 curl http://localhost:8000/health
@@ -201,6 +203,14 @@ python -m core.orchestrator.openclaw_cli interactive
 
 # 5. Open dashboard
 streamlit run dashboard/streamlit_app.py
+```
+
+### Verification
+```bash
+# Includes target contracts, every transform, real live hot-swap, telemetry,
+# and an injected post-deploy failure that must roll back.
+pytest -q
+# Expected: 36 passed
 ```
 
 ### OpenClaw Commands Reference
@@ -261,6 +271,7 @@ For live demo evidence, capture and place in `artifacts/`:
 /ZeroWall
 ├── apps/target-fastapi/        # Vulnerable demo FastAPI app
 │   ├── main.py                 # 3 simulated vulnerable endpoints
+│   ├── managed_runner.py       # Serves/reloads the managed deployment slot
 │   ├── test_app.py             # 25+ unit tests (verifier uses these)
 │   ├── requirements.txt
 │   └── Dockerfile
@@ -311,6 +322,8 @@ For live demo evidence, capture and place in `artifacts/`:
 
 ## Safety Disclaimer <a name="disclaimer"></a>
 
+See [SECURITY.md](SECURITY.md) for safe-testing boundaries and private vulnerability reporting.
+
 > ⚠️ **HACKATHON SAFETY NOTICE**
 >
 > ZeroWall is built for safe, controlled demonstration purposes only.
@@ -319,7 +332,13 @@ For live demo evidence, capture and place in `artifacts/`:
 > - All simulated vulnerabilities are sandboxed in an in-memory dictionary
 > - Exploit payloads target ONLY the local demo FastAPI container — no external network probing
 > - No real offensive tooling is included in this project
-> - The deploy controller only modifies the local demo app source file
+> - The deploy controller only writes the local, versioned demo deployment slot
 > - All "exploits" are pre-defined, non-harmful HTTP requests that trigger simulated response patterns
 
-This project demonstrates the *architecture* and *decision-making pipeline* of a moving target defense system. Real deployment would use actual vulnerability detection, but safety is the top priority for this demonstration.
+This project demonstrates an *MTD-inspired adaptive hardening pipeline*; it is not a general-purpose autonomous patcher. Real deployment would use actual vulnerability detection, but safety is the top priority for this demonstration.
+
+---
+
+## License
+
+ZeroWall is licensed under the [Apache License 2.0](LICENSE).
