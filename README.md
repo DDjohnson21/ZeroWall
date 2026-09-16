@@ -4,9 +4,28 @@
 > **Hackathon proof of concept — not production security software.**
 > ZeroWall demonstrates a safe, local adaptive-hardening workflow designed for NVIDIA DGX Spark, with CPU fallbacks for development. Its bundled vulnerabilities, attacks, and deployments target the included simulated FastAPI application. Do not expose the demo services to untrusted networks or use them to protect production systems.
 
+## Why I Built ZeroWall
+
+ZeroWall started with a simple question: what if defenders could adapt software
+faster than attackers could exploit it?
+
+Most security response is reactive: detect an issue, patch it, redeploy, and
+verify that nothing broke. The longer-term vision for ZeroWall is a continuous
+adaptive-defense model **(currently initiated by an operator or mock-alert
+trigger for demonstration and testing purposes)**: generate constrained
+defensive variants, test them, replay known exploits, and publish only a
+candidate that passes live verification.
+
+Inspired by moving target defense, I used locally trained models and NVIDIA DGX
+Spark to explore whether learned policies could rank vetted security
+transformations from observed outcomes. The models do not generate arbitrary
+patches or replace security rules; they select among registered safeguards while
+tests, acceptance gates, and rollback remain in control.
+
 ---
 
 ## 📋 Table of Contents
+- [Why I Built ZeroWall](#why-i-built-zerowall)
 - [Overview](#overview)
 - [Problem Statement](#problem-statement)
 - [Architecture](#architecture)
