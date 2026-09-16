@@ -16,7 +16,15 @@ echo "Burst: ${BURST_SIZE} requests | Concurrency: ${CONCURRENCY}"
 echo ""
 
 cd "$(dirname "$0")/.."
-python3 -m core.orchestrator.openclaw_cli benchmark \
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+  if [[ -x ".venv/bin/python" ]]; then
+    PYTHON_BIN=".venv/bin/python"
+  else
+    PYTHON_BIN="python3"
+  fi
+fi
+
+"${PYTHON_BIN}" -m core.orchestrator.openclaw_cli benchmark \
   --target-url "${TARGET_URL}" \
   --burst-size "${BURST_SIZE}" \
   --concurrency "${CONCURRENCY}" \

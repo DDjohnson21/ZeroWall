@@ -15,6 +15,15 @@ RESET='\033[0m'
 
 TARGET_URL="${TARGET_URL:-http://localhost:8000}"
 
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+  if [[ -x "${ROOT_DIR}/.venv/bin/python" ]]; then
+    PYTHON_BIN="${ROOT_DIR}/.venv/bin/python"
+  else
+    PYTHON_BIN="python3"
+  fi
+fi
+
 echo -e "${CYAN}${BOLD}"
 echo "╔══════════════════════════════════════════════════╗"
 echo "║   ZeroWall — NVIDIA DGX Spark Hackathon Demo    ║"
@@ -25,15 +34,15 @@ echo -e "${BOLD}Step 1: Verify target app is running${RESET}"
 echo -e "→ Checking ${TARGET_URL}/health ..."
 HEALTH=$(curl -fsS ${TARGET_URL}/health)
 echo -e "${GREEN}✓ Health check response: ${HEALTH}${RESET}"
-BEFORE_HASH=$(curl -fsS ${TARGET_URL}/version | python3 -c 'import json,sys; print(json.load(sys.stdin)["loaded_source_hash"])')
+BEFORE_HASH=$(curl -fsS ${TARGET_URL}/version | "${PYTHON_BIN}" -c 'import json,sys; print(json.load(sys.stdin)["loaded_source_hash"])')
 echo ""
 
 echo -e "${BOLD}Step 2: Normal requests work (pre-attack)${RESET}"
 echo -e "→ GET /public ..."
-curl -s ${TARGET_URL}/public | python3 -m json.tool
+curl -s ${TARGET_URL}/public | "${PYTHON_BIN}" -m json.tool
 echo ""
 echo -e "→ GET /items/1 ..."
-curl -s ${TARGET_URL}/items/1 | python3 -m json.tool
+curl -s ${TARGET_URL}/items/1 | "${PYTHON_BIN}" -m json.tool
 echo ""
 
 echo -e "${BOLD}Step 3: Trigger known exploit (SIMULATED — local demo app only)${RESET}"
@@ -53,8 +62,8 @@ echo -e "${YELLOW}🚨 [OPENCLAW] Initiating ZeroWall defense cycle...${RESET}"
 echo ""
 
 echo -e "${BOLD}Step 5: Run ZeroWall defense cycle${RESET}"
-cd "$(dirname "$0")/.."
-python3 -m core.orchestrator.openclaw_cli defend \
+cd "${ROOT_DIR}"
+"${PYTHON_BIN}" -m core.orchestrator.openclaw_cli defend \
   --endpoint "/data" \
   --payload-type "path-traversal"
 echo ""
@@ -62,8 +71,8 @@ echo ""
 echo -e "${BOLD}Step 6: Deploy best variant${RESET}"
 echo -e "→ Checking active version..."
 VERSION_JSON=$(curl -fsS ${TARGET_URL}/version)
-echo "${VERSION_JSON}" | python3 -m json.tool
-AFTER_HASH=$(echo "${VERSION_JSON}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["loaded_source_hash"])')
+echo "${VERSION_JSON}" | "${PYTHON_BIN}" -m json.tool
+AFTER_HASH=$(echo "${VERSION_JSON}" | "${PYTHON_BIN}" -c 'import json,sys; print(json.load(sys.stdin)["loaded_source_hash"])')
 if [[ "${AFTER_HASH}" == "${BEFORE_HASH}" ]]; then
   echo -e "${RED}✗ LIVE DEPLOY FAILED: worker source hash did not change${RESET}"
   exit 1
@@ -73,9 +82,9 @@ echo ""
 
 echo -e "${BOLD}Step 7: Verify normal requests still work (post-deploy)${RESET}"
 echo -e "→ GET /health ..."
-curl -s ${TARGET_URL}/health | python3 -m json.tool
+curl -s ${TARGET_URL}/health | "${PYTHON_BIN}" -m json.tool
 echo -e "→ GET /items/2 ..."
-curl -s ${TARGET_URL}/items/2 | python3 -m json.tool
+curl -s ${TARGET_URL}/items/2 | "${PYTHON_BIN}" -m json.tool
 echo ""
 
 echo -e "${BOLD}Step 8: Replay exploit against hardened version${RESET}"

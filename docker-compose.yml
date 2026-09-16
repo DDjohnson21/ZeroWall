@@ -77,7 +77,7 @@ services:
 
   # ── 3. vLLM Inference Server (local LLM runtime) ─────────────────────────
   vllm:
-    image: vllm/vllm-openai:latest
+    image: ${VLLM_IMAGE:-nvcr.io/nvidia/vllm:26.08-py3}
     container_name: zerowall-vllm
     networks:
       - zerowall-net
@@ -88,8 +88,11 @@ services:
     volumes:
       - ${MODEL_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
     command: >
+      python3 -m vllm.entrypoints.openai.api_server
       --model ${VLLM_MODEL:-microsoft/phi-2}
       --dtype float16
+      --gpu-memory-utilization ${VLLM_GPU_MEMORY_UTILIZATION:-0.7}
+      --max-num-seqs ${VLLM_MAX_NUM_SEQS:-4}
       --max-model-len 2048
       --tensor-parallel-size ${VLLM_TP_SIZE:-1}
       --enforce-eager
