@@ -11,6 +11,8 @@ SAFETY: URL paths are never changed. Only internal function names
 that back routes are renamed, keeping all external API contracts.
 """
 
+import hashlib
+
 import libcst as cst
 from typing import Dict, Any, List, Sequence
 from core.transforms.base import BaseTransformer, register_transform
@@ -65,7 +67,8 @@ class RouteRotationTransformer(BaseTransformer):
 
         rename_map = {}
         for handler in self._TARGET_HANDLERS:
-            if hash(handler + str(seed)) % 2 == 0:  # deterministic selection
+            digest = hashlib.sha256(f"{handler}:{seed}".encode()).digest()
+            if digest[0] % 2 == 0:
                 rename_map[handler] = f"{handler}{suffix}_zw{seed}"
 
         try:

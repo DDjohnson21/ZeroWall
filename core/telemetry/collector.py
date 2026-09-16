@@ -59,6 +59,12 @@ class TelemetryCollector:
         self.record("candidate_count", len(cycle.candidates), cycle_id=cycle.cycle_id)
         self.record("action", cycle.action, cycle_id=cycle.cycle_id)
         self.record(
+            "active_exploit_rate",
+            cycle.active_exploit_rate,
+            cycle_id=cycle.cycle_id,
+            extra={"deployment_verified": cycle.deployment_verified},
+        )
+        self.record(
             "mutation_inference_latency_ms",
             cycle.mutation_inference_latency_ms,
             cycle_id=cycle.cycle_id,

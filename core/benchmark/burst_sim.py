@@ -210,8 +210,12 @@ async def run_full_benchmark(
     if defense_loop:
         console.print("[yellow]Phase 2: Timing defense cycle...[/yellow]")
         t_cycle = time.time()
-        cycle = defense_loop.run_defense_cycle(
-            attack_context={"trigger": "benchmark", "endpoint": "/data"}
+        cycle = await defense_loop.run_defense_cycle_async(
+            attack_context={
+                "trigger": "benchmark",
+                "endpoint": "/data",
+                "payload_type": "path-traversal",
+            }
         )
         cycle_time = time.time() - t_cycle
         mutation_count = len(cycle.candidates)

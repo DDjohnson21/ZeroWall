@@ -23,8 +23,9 @@ echo -e "${RESET}"
 
 echo -e "${BOLD}Step 1: Verify target app is running${RESET}"
 echo -e "→ Checking ${TARGET_URL}/health ..."
-HEALTH=$(curl -s ${TARGET_URL}/health)
+HEALTH=$(curl -fsS ${TARGET_URL}/health)
 echo -e "${GREEN}✓ Health check response: ${HEALTH}${RESET}"
+BEFORE_HASH=$(curl -fsS ${TARGET_URL}/version | python3 -c 'import json,sys; print(json.load(sys.stdin)["loaded_source_hash"])')
 echo ""
 
 echo -e "${BOLD}Step 2: Normal requests work (pre-attack)${RESET}"
@@ -60,7 +61,14 @@ echo ""
 
 echo -e "${BOLD}Step 6: Deploy best variant${RESET}"
 echo -e "→ Checking active version..."
-curl -s ${TARGET_URL}/version | python3 -m json.tool
+VERSION_JSON=$(curl -fsS ${TARGET_URL}/version)
+echo "${VERSION_JSON}" | python3 -m json.tool
+AFTER_HASH=$(echo "${VERSION_JSON}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["loaded_source_hash"])')
+if [[ "${AFTER_HASH}" == "${BEFORE_HASH}" ]]; then
+  echo -e "${RED}✗ LIVE DEPLOY FAILED: worker source hash did not change${RESET}"
+  exit 1
+fi
+echo -e "${GREEN}✓ Live worker loaded new source hash: ${AFTER_HASH}${RESET}"
 echo ""
 
 echo -e "${BOLD}Step 7: Verify normal requests still work (post-deploy)${RESET}"
@@ -74,10 +82,11 @@ echo -e "${BOLD}Step 8: Replay exploit against hardened version${RESET}"
 echo -e "${CYAN}→ Simulated path traversal: GET /data?file=../../etc/passwd${RESET}"
 POST_EXPLOIT=$(curl -s "${TARGET_URL}/data?file=../../etc/passwd")
 echo "Post-defense response: ${POST_EXPLOIT}"
-if echo "$POST_EXPLOIT" | grep -q "403\|Access denied\|not in allowlist"; then
+if echo "$POST_EXPLOIT" | grep -qi "Access denied\|not in allowlist\|rejected by guard\|Invalid filename"; then
   echo -e "${GREEN}✓ BLOCKED: Exploit now fails against hardened variant!${RESET}"
 else
-  echo -e "${YELLOW}⚠  Check deploy — candidate may need rebuild restart${RESET}"
+  echo -e "${RED}✗ FAILED: live target still accepts the exploit${RESET}"
+  exit 1
 fi
 echo ""
 

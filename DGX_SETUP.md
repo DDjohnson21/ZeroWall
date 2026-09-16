@@ -1,5 +1,7 @@
 # ZeroWall — DGX Spark Setup Guide (Fresh System)
 
+> **Hackathon proof of concept:** run only in a controlled demo environment. Do not expose these services to untrusted networks or use ZeroWall as production security software.
+
 Complete setup from a blank NVIDIA DGX Spark to running the full demo.
 
 ---
@@ -67,7 +69,7 @@ git clone <your-repo-url> ZeroWall
 cd ZeroWall
 ```
 
-> **If transferring from your Mac:** `scp -r /Users/damienjohnson/Desktop/Code/Nullcondition/ZeroWall dgx-user@<DGX_IP>:~/ZeroWall`
+> **If transferring from another machine:** `scp -r /path/to/ZeroWall dgx-user@<DGX_IP>:~/ZeroWall`
 
 ---
 

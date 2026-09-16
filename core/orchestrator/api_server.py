@@ -7,6 +7,7 @@ Used by the Streamlit dashboard and external tooling.
 
 import logging
 import os
+import threading
 from typing import Any, Dict
 
 import uvicorn
@@ -28,6 +29,7 @@ app.add_middleware(
 
 # Lazy-init the DefenseLoop so the server starts even if Triton/vLLM aren't ready
 _defense_loop = None
+_defense_lock = threading.Lock()
 
 
 def get_defense_loop():
@@ -40,6 +42,7 @@ def get_defense_loop():
             triton_port=int(os.getenv("TRITON_HTTP_PORT", "8000")),
             vllm_host=os.getenv("VLLM_HOST", "vllm"),
             vllm_port=int(os.getenv("VLLM_PORT", "8000")),
+            candidate_count=int(os.getenv("MUTATION_CANDIDATE_COUNT", "10")),
         )
     return _defense_loop
 
@@ -65,6 +68,8 @@ def status():
 
 @app.post("/defend")
 def defend(req: DefendRequest):
+    if not _defense_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="A defense cycle is already running")
     try:
         loop = get_defense_loop()
         cycle = loop.run_defense_cycle(req.attack_context)
@@ -73,10 +78,16 @@ def defend(req: DefendRequest):
             "action": cycle.action,
             "winner_id": cycle.winner_id,
             "cycle_latency_s": cycle.cycle_latency_s,
+            "deployment_verified": cycle.deployment_verified,
+            "baseline_exploit_rate": cycle.baseline_exploit_rate,
+            "active_exploit_rate": cycle.active_exploit_rate,
+            "deployment_error": cycle.deployment_error,
         }
     except Exception as e:
         logger.error(f"Defense cycle failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        _defense_lock.release()
 
 
 @app.get("/analytics")

@@ -193,4 +193,32 @@ class MutationAgent:
         if transform_type == TransformType.SWAP_VALIDATORS:
             strategies = ["allowlist", "strict_type", "regex_guard"]
             base["strategy"] = strategies[seed % len(strategies)]
+
+        # Candidates sharing a primary defense still receive distinct, audited
+        # structural layouts. This yields real variant diversity without allowing
+        # the planner to emit arbitrary source code.
+        combinations = [
+            [],
+            [TransformType.RENAME_IDENTIFIERS],
+            [TransformType.ROUTE_ROTATION],
+            [TransformType.REORDER_BLOCKS],
+            [TransformType.RENAME_IDENTIFIERS, TransformType.ROUTE_ROTATION],
+            [TransformType.RENAME_IDENTIFIERS, TransformType.REORDER_BLOCKS],
+            [TransformType.ROUTE_ROTATION, TransformType.REORDER_BLOCKS],
+            [TransformType.SPLIT_HELPERS],
+        ]
+        selected = [
+            t
+            for t in combinations[seed % len(combinations)]
+            if t != transform_type
+        ]
+        if seed >= len(combinations):
+            extra = (
+                TransformType.SPLIT_HELPERS
+                if transform_type != TransformType.SPLIT_HELPERS
+                else TransformType.RENAME_IDENTIFIERS
+            )
+            if extra not in selected:
+                selected.append(extra)
+        base["diversifiers"] = [t.value for t in selected]
         return base

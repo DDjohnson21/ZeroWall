@@ -11,6 +11,7 @@ This app is the attack surface that ZeroWall defends.
 
 import os
 import hashlib
+import json
 import time
 from pathlib import Path
 from typing import Optional
@@ -23,6 +24,28 @@ import uvicorn
 APP_VERSION = os.environ.get("APP_VERSION", "v1.0.0-ORIGINAL")
 DEPLOY_HASH = os.environ.get("DEPLOY_HASH", "aabbcc001122")
 START_TIME = time.time()
+LOADED_SOURCE_HASH = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]
+
+
+def _runtime_version():
+    """Return the version currently selected by the ZeroWall deploy controller.
+
+    The managed runner supplies the manifest path. Candidate sandboxes and the
+    ordinary unit tests do not, so they keep using the static environment values.
+    Reading this tiny file per health/version request lets a reloaded worker prove
+    which exact artifact is serving live traffic.
+    """
+    manifest_path = os.environ.get("ZEROWALL_MANIFEST_PATH")
+    if manifest_path:
+        try:
+            manifest = json.loads(Path(manifest_path).read_text())
+            return (
+                manifest.get("active_version_id", APP_VERSION),
+                manifest.get("active_hash", DEPLOY_HASH),
+            )
+        except (OSError, ValueError, TypeError):
+            pass
+    return APP_VERSION, DEPLOY_HASH
 
 # ─── Simulated in-memory data store (no real FS or DB access) ─────────────
 SIMULATED_FILES = {
@@ -51,10 +74,12 @@ app = FastAPI(
 @app.get("/health")
 def health_check():
     """Always-safe health check. ZeroWall verifies this keeps working."""
+    version, deploy_hash = _runtime_version()
     return {
         "status": "ok",
-        "version": APP_VERSION,
-        "deploy_hash": DEPLOY_HASH,
+        "version": version,
+        "deploy_hash": deploy_hash,
+        "loaded_source_hash": LOADED_SOURCE_HASH,
         "uptime_seconds": round(time.time() - START_TIME, 2),
     }
 
@@ -62,9 +87,11 @@ def health_check():
 @app.get("/version")
 def get_version():
     """Returns current deployed version info."""
+    version, deploy_hash = _runtime_version()
     return {
-        "app_version": APP_VERSION,
-        "deploy_hash": DEPLOY_HASH,
+        "app_version": version,
+        "deploy_hash": deploy_hash,
+        "loaded_source_hash": LOADED_SOURCE_HASH,
         "zerowall_managed": True,
     }
 

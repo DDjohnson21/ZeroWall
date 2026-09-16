@@ -11,6 +11,7 @@ export type Status = {
   nemo_planner_active?: boolean;
   nemo_adapter_present?: boolean;
   last_planner_tier?: string;
+  deployment_verified?: boolean;
   status?: string;
 };
 
@@ -51,7 +52,16 @@ export const api = {
   analytics: () => j<Analytics>("/analytics"),
   cycles: () => j<{ total: number; cycles: CycleRow[] }>("/cycles"),
   defend: (attack_context: Record<string, unknown>) =>
-    j<{ cycle_id: string; action: string; winner_id: string | null; cycle_latency_s: number }>(
+    j<{
+      cycle_id: string;
+      action: string;
+      winner_id: string | null;
+      cycle_latency_s: number;
+      deployment_verified: boolean;
+      baseline_exploit_rate: number;
+      active_exploit_rate: number;
+      deployment_error: string | null;
+    }>(
       "/defend",
       {
         method: "POST",

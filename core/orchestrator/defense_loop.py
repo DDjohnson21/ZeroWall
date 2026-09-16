@@ -23,6 +23,8 @@ import logging
 import time
 import uuid
 from pathlib import Path
+
+import httpx
 from typing import Dict, Any, List, Optional
 
 from core.models import (
@@ -76,6 +78,9 @@ class DefenseLoop:
         candidate_count: int = 10,
         workers: int = 4,
         telemetry: Optional[TelemetryCollector] = None,
+        deploy_controller: Optional[DeployController] = None,
+        feedback_recorder: Optional[FeedbackRecorder] = None,
+        live_gate_timeout_s: float = 20.0,
     ):
         # Inference clients
         self.triton = TritonClient(host=triton_host, port=triton_port)
@@ -98,15 +103,21 @@ class DefenseLoop:
         self.verifier_agent = VerifierAgent(run_bandit=True)
         self.risk_agent = RiskAgent(triton_client=self.triton)
         self.explanation_agent = ExplanationAgent(vllm_client=self.vllm)
-        self.deploy_controller = DeployController()
-        self.feedback_recorder = FeedbackRecorder()
+        self.deploy_controller = deploy_controller or DeployController()
+        self.feedback_recorder = feedback_recorder or FeedbackRecorder()
 
         self.telemetry = telemetry or TelemetryCollector()
         self.target_url = target_url
         self.candidate_count = candidate_count
         self.workers = workers
-        self._active_version_hash: str = "aabbcc001122"
-        self._active_source: str = TARGET_SOURCE_PATH.read_text() if TARGET_SOURCE_PATH.exists() else ""
+        self.live_gate_timeout_s = live_gate_timeout_s
+        deploy_status = self.deploy_controller.get_status()
+        self._active_version_hash = str(deploy_status.get("active_hash", "unknown"))
+        active_path = self.deploy_controller.target_source
+        self._active_source = (
+            active_path.read_text() if active_path.exists()
+            else (TARGET_SOURCE_PATH.read_text() if TARGET_SOURCE_PATH.exists() else "")
+        )
         self._cycles: List[DefenseCycle] = []
 
     def run_defense_cycle(
@@ -124,7 +135,15 @@ class DefenseLoop:
         Returns:
             Completed DefenseCycle with winner, action, and explanation
         """
-        return asyncio.run(self._async_defense_cycle(attack_context, source_path))
+        return asyncio.run(self.run_defense_cycle_async(attack_context, source_path))
+
+    async def run_defense_cycle_async(
+        self,
+        attack_context: Dict[str, Any],
+        source_path: Optional[str] = None,
+    ) -> DefenseCycle:
+        """Async entry point for API/benchmark callers already in an event loop."""
+        return await self._async_defense_cycle(attack_context, source_path)
 
     async def _async_defense_cycle(
         self,
@@ -163,6 +182,8 @@ class DefenseLoop:
             baseline_candidate, self.target_url
         )
         before_rate = baseline_candidate.exploit_success_rate
+        cycle.baseline_exploit_rate = before_rate
+        cycle.active_exploit_rate = before_rate
         logger.info(f"[DefenseLoop] Baseline exploit success rate: {before_rate:.0%}")
         self.telemetry.record("baseline_exploit_rate", before_rate, cycle_id=cycle_id)
 
@@ -185,8 +206,13 @@ class DefenseLoop:
 
         # ── Step 3: Apply transforms + build CandidateResult objects ─────
         logger.info(f"[DefenseLoop] Step 3/6: Applying transforms...")
-        source_code = Path(src_path).read_text() if Path(src_path).exists() else self._active_source
+        source_code = (
+            Path(source_path).read_text()
+            if source_path and Path(source_path).exists()
+            else self._active_source
+        )
         candidates = []
+        seen_variants = set()
         for plan in plans:
             try:
                 mutated_code, description = apply_transform(
@@ -194,13 +220,28 @@ class DefenseLoop:
                     plan.transform_type,
                     plan.transform_params,
                 )
-                plan.diff_summary = description
-                candidate = CandidateResult(
-                    candidate_id=plan.candidate_id,
-                    plan=plan,
-                    mutated_code=mutated_code,
+                descriptions = [description]
+                for extra_name in plan.transform_params.get("diversifiers", []):
+                    extra_type = TransformType(extra_name)
+                    mutated_code, extra_desc = apply_transform(
+                        mutated_code,
+                        extra_type,
+                        plan.transform_params,
+                    )
+                    descriptions.append(extra_desc)
+                variant_hash = hashlib.sha256(mutated_code.encode()).hexdigest()
+                if variant_hash in seen_variants:
+                    logger.info("[DefenseLoop] skipping duplicate %s", plan.candidate_id)
+                    continue
+                seen_variants.add(variant_hash)
+                plan.diff_summary = " + ".join(descriptions)
+                candidates.append(
+                    CandidateResult(
+                        candidate_id=plan.candidate_id,
+                        plan=plan,
+                        mutated_code=mutated_code,
+                    )
                 )
-                candidates.append(candidate)
             except Exception as e:
                 logger.warning(f"[DefenseLoop] Transform failed for {plan.candidate_id}: {e}")
 
@@ -254,18 +295,46 @@ class DefenseLoop:
             None,
         )
         if cycle.action == "deploy" and winner is not None and winner.mutated_code:
+            record = None
             try:
                 record = self.deploy_controller.deploy(winner, cycle_id)
                 cycle.deploy_hash = record["content_hash"]
-                # Advance the moving target: the next cycle mutates from the
-                # already-hardened source, so defenses compound over time.
+                gate_ok, gate_error = await self._post_deploy_gate(
+                    winner, record["content_hash"]
+                )
+                if not gate_ok:
+                    raise RuntimeError(gate_error)
+
+                self.deploy_controller.confirm(record, winner.exploit_success_rate)
+                cycle.deployment_verified = True
+                cycle.active_exploit_rate = winner.exploit_success_rate
                 self._active_source = winner.mutated_code
                 self._active_version_hash = record["content_hash"]
                 self.telemetry.record("deploy_version", record["version_id"], cycle_id=cycle_id)
-                logger.info(f"[DefenseLoop] 🚀 Deployed {record['version_id']}")
+                logger.info("[DefenseLoop] live gate passed for %s", record["version_id"])
             except Exception as e:
-                logger.error(f"[DefenseLoop] Deploy failed: {e}")
-                cycle.action = "reject"
+                cycle.deployment_error = str(e)
+                logger.error("[DefenseLoop] post-deploy gate failed: %s", e)
+                if record is not None:
+                    rollback = self.deploy_controller.rollback(record)
+                    expected = rollback.get("content_hash")
+                    if expected:
+                        await self._wait_for_live_version(str(expected))
+                    cycle.action = "rollback"
+                    assessment.action = "rollback"
+                    assessment.reasoning = (
+                        f"Published candidate failed the live gate ({e}); "
+                        f"restored {rollback.get('version', 'previous version')}."
+                    )
+                    winner.status = CandidateStatus.REJECTED
+                    if self.deploy_controller.target_source.exists():
+                        self._active_source = self.deploy_controller.target_source.read_text()
+                    self._active_version_hash = str(
+                        self.deploy_controller.get_status().get("active_hash", "unknown")
+                    )
+                else:
+                    cycle.action = "reject"
+                    assessment.action = "reject"
 
         # ── Generate explanation ──────────────────────────────────────────
         t_exp = time.time()
@@ -277,9 +346,7 @@ class DefenseLoop:
         cycle.cycle_latency_s = cycle.cycle_end - cycle_start
 
         # ── Emit telemetry ────────────────────────────────────────────────
-        self.telemetry.record("cycle_latency_s", cycle.cycle_latency_s, cycle_id=cycle_id)
-        self.telemetry.record("cycle_action", cycle.action, cycle_id=cycle_id)
-        self.telemetry.record("risk_latency_ms", risk_latency_ms, cycle_id=cycle_id)
+        self.telemetry.record_cycle(cycle)
         self._cycles.append(cycle)
 
         # ── Closed-loop feedback: turn this outcome into training labels ───
@@ -297,6 +364,48 @@ class DefenseLoop:
         logger.info(f"{'='*60}\n")
 
         return cycle
+
+    async def _wait_for_live_version(self, expected_hash: str) -> bool:
+        """Wait until the managed target reports the exact published artifact."""
+        deadline = time.monotonic() + self.live_gate_timeout_s
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            while time.monotonic() < deadline:
+                try:
+                    response = await client.get(f"{self.target_url}/version")
+                    if (
+                        response.status_code == 200
+                        and str(response.json().get("loaded_source_hash")) == expected_hash
+                    ):
+                        return True
+                except (httpx.HTTPError, ValueError):
+                    pass
+                await asyncio.sleep(0.15)
+        return False
+
+    async def _post_deploy_gate(
+        self,
+        winner: CandidateResult,
+        expected_hash: str,
+    ) -> tuple[bool, str]:
+        if not await self._wait_for_live_version(expected_hash):
+            return False, f"live target did not load deploy hash {expected_hash}"
+
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            for path in ("/health", "/public", "/items/1"):
+                try:
+                    response = await client.get(f"{self.target_url}{path}")
+                except httpx.HTTPError as exc:
+                    return False, f"smoke check {path} failed: {exc}"
+                if response.status_code != 200:
+                    return False, f"smoke check {path} returned {response.status_code}"
+
+        await self.exploit_agent.replay_against_candidate(winner, self.target_url)
+        if winner.exploit_attempts == 0 or winner.exploit_success_rate >= 0.5:
+            return (
+                False,
+                f"live exploit success rate remained {winner.exploit_success_rate:.0%}",
+            )
+        return True, ""
 
     async def _parallel_verify(self, candidates: List[CandidateResult]) -> List[CandidateResult]:
         """Run verifier on all candidates using thread pool (pytest is subprocess-based)."""
@@ -365,4 +474,7 @@ class DefenseLoop:
             "nemo_planner_active": self.nemo_planner.available,
             "nemo_adapter_present": self.nemo_planner.adapter_present,
             "last_planner_tier": self.mutation_agent.last_source_tier,
+            "deployment_verified": self.deploy_controller.get_status().get(
+                "last_deploy_verified", False
+            ),
         }

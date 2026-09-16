@@ -184,6 +184,12 @@ export default function Page() {
             <span className="label">Active version</span>
             <code className="mono">{status?.active_version_hash ?? "—"}</code>
           </div>
+          <div className="row">
+            <span className="label">Live deployment gate</span>
+            <span className={status?.deployment_verified ? "pill deploy" : "pill reject"}>
+              {status?.deployment_verified ? "verified" : "not yet verified"}
+            </span>
+          </div>
         </div>
 
         {/* Recent cycles */}
