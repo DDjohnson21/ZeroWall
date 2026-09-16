@@ -2,7 +2,7 @@
 
 > [!IMPORTANT]
 > **Hackathon proof of concept — not production security software.**
-> ZeroWall demonstrates a safe, local adaptive-hardening workflow on NVIDIA DGX Spark. Its vulnerabilities, attacks, and deployments target only the included simulated FastAPI application. Do not expose the demo services to untrusted networks or use them to protect production systems.
+> ZeroWall demonstrates a safe, local adaptive-hardening workflow designed for NVIDIA DGX Spark, with CPU fallbacks for development. Its bundled vulnerabilities, attacks, and deployments target the included simulated FastAPI application. Do not expose the demo services to untrusted networks or use them to protect production systems.
 
 ---
 
@@ -13,7 +13,7 @@
 - [NVIDIA Stack Usage](#nvidia-stack)
 - [NVIDIA Requirement Mapping](#requirement-mapping)
 - [Demo Instructions](#demo)
-- [Benchmark Evidence](#benchmark)
+- [Benchmarking](#benchmark)
 - [Screenshot Checklist](#screenshots)
 - [Disclaimer](#disclaimer)
 - [License](#license)
@@ -22,63 +22,121 @@
 
 ## Overview
 
-ZeroWall is an **MTD-inspired, multi-agent adaptive self-hardening system** that runs entirely on NVIDIA DGX Spark. It selects from audited transformations; it never lets a model write arbitrary source code.
+ZeroWall is an **MTD-inspired, multi-agent adaptive-hardening proof of concept** designed for NVIDIA DGX Spark. It can also run in CPU development mode through deterministic, NumPy, and pandas fallbacks. Models select from registered transformations; they never write arbitrary source code.
 
-When an attack is detected, ZeroWall:
-1. Generates **8–20 behavior-preserving code mutation candidates** via a safe deterministic transformer
-2. **Replays known exploits** against each candidate in parallel
-3. **Runs test suites** to verify functional correctness is preserved
-4. **Scores risk** using a weighted confidence model (served via Triton)
+When an operator or mock alert supplies attack context, ZeroWall:
+1. Generates a configurable set of **benign-contract-preserving mutation candidates** (10 by default)
+2. **Runs tests** to reject candidates that break the target contract
+3. **Replays known exploits** against passing candidates in parallel
+4. **Scores risk** through Triton when available, with a local weighted-formula fallback
 5. **Deploys the winning variant** and rolls back if post-deploy checks fail
 
-Every published version combines an audited security guard with a distinct structural layout. The live gate proves the new worker loaded the exact artifact, preserves normal traffic, and blocks replayed attacks before the deployment is accepted.
+Candidates are published only after verification and scoring. The live gate confirms that the managed worker loaded the exact artifact, preserves representative normal traffic, and blocks the predefined replay set before accepting the deployment.
 
 ---
 
 ## Problem Statement
 
-Static defenses fail against adaptive attackers and manual patch cycles are slow. ZeroWall demonstrates a constrained response loop: detect, propose audited variants, test, attack, score, publish, verify live, and automatically restore the previous artifact on failure.
+Static defenses fail against adaptive attackers and manual patch cycles are slow. ZeroWall demonstrates a constrained response loop: receive an alert, propose registered variants, test, replay, score, publish, verify live, and automatically restore the previous artifact on failure.
 
 ---
 
 ## Architecture
 
+```text
+┌──────────────────────┐       attack context       ┌────────────────────────┐
+│ Operator / Mock IDS  │ ─────────────────────────► │ ZeroWall Core API / CLI│
+│ /defend /simulate... │                            └───────────┬────────────┘
+└──────────────────────┘                                        │
+                                                                ▼
+┌────────────────────── NVIDIA DGX Spark or local development host ──────────────────────┐
+│                                                                                        │
+│  ┌────────────────────────── ZeroWall Core Engine ───────────────────────────────────┐  │
+│  │                                                                                  │  │
+│  │  ┌──────────────────────── Defense Loop Orchestrator ──────────────────────────┐  │  │
+│  │  │  1. Baseline replay       4. Verifier Agent: pytest + optional Bandit      │  │  │
+│  │  │  2. Mutation Agent        5. Exploit Agent: isolated HTTP replay           │  │  │
+│  │  │  3. Transform Engine      6. Risk Agent → deploy or reject                 │  │  │
+│  │  │                             Explanation Agent → cycle summary              │  │  │
+│  │  └──────────────┬──────────────────────┬──────────────────────┬───────────────┘  │  │
+│  │                 │                      │                      │                  │  │
+│  │                 ▼                      ▼                      ▼                  │  │
+│  │  ┌────────────────────────┐  ┌────────────────────┐  ┌──────────────────────┐   │  │
+│  │  │ Planner cascade        │  │ Candidate workers  │  │ Deployment Controller│   │  │
+│  │  │ • NeMo adapter*        │  │ • temporary dirs   │  │ • immutable versions │   │  │
+│  │  │ • learned NumPy policy │  │ • local processes  │  │ • atomic active slot │   │  │
+│  │  │ • Triton policy*       │  │ • predefined replay│  │ • verified rollback  │   │  │
+│  │  │ • deterministic fallback│ └────────────────────┘  └──────────┬───────────┘   │  │
+│  │  └────────────────────────┘                                      │               │  │
+│  │                                                                  ▼               │  │
+│  │  ┌───────────────────┐  ┌───────────────────┐       ┌────────────────────────┐   │  │
+│  │  │ Triton Server*    │  │ vLLM Server*      │       │ Versioned deploy volume│   │  │
+│  │  │ planner + risk    │  │ explain + NeMo    │       └───────────┬────────────┘   │  │
+│  │  └───────────────────┘  └───────────────────┘                   │                │  │
+│  └──────────────────────────────────────────────────────────────────┼────────────────┘  │
+│                                                                     ▼                   │
+│  ┌──────────────────────┐   predefined HTTP   ┌─────────────────────────────────────┐   │
+│  │ Seed script / replay │ ──────────────────► │ Managed FastAPI target              │   │
+│  └──────────────────────┘                     │ vulnerable baseline → accepted build│   │
+│                                               └─────────────────────────────────────┘   │
+│                                                                                        │
+│  JSONL telemetry ──► cuDF* or pandas analytics ──► Streamlit + Next.js dashboards      │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+
+* Optional accelerated component; the defense loop has a local fallback.
 ```
-                         ┌──────────────────────────────────────────────────┐
-                         │              NVIDIA DGX Spark                    │
-                         │                                                  │
-  ┌──────────┐           │  ┌─────────────────────────────────────────────┐ │
-  │ Attacker │──exploit──►  │         ZeroWall Core Engine                │ │
-  └──────────┘           │  │                                             │ │
-                         │  │  ┌──────────────────────────────────────┐   │ │
-  ┌──────────────┐        │  │  │    Defense Loop Orchestrator         │   │ │
-  │ OpenClaw CLI │──────►  │  │  │  (defense_loop.py)                 │   │ │
-  │ /defend      │        │  │  │  1. Mutation Agent ─────────────────┼──►│ │
-  │ /replay      │        │  │  │  2. Safe Transform Engine (libcst)  │   │ │
-  │ /status      │        │  │  │  3. Verifier Agent (pytest+bandit)  │   │ │
-  │ /benchmark   │        │  │  │  4. Exploit Agent (HTTP replay)     │   │ │
-  │ /alert       │        │  │  │  5. Risk Agent ─────────────────────┼──►│ │
-  └──────────────┘        │  │  │  6. Explanation Agent               │   │ │
-                         │  │  └──────────────────────────────────────┘   │ │
-                         │  │                                             │ │
-  ┌──────────────┐        │  │  ┌──────────────┐  ┌───────────────────┐  │ │
-  │  Streamlit   │◄───────├──┤  │    Triton    │  │  vLLM Server      │  │ │
-  │  Dashboard   │        │  │  │  Inference   │  │ (local LLM         │  │ │
-  └──────────────┘        │  │  │  Server      │  │  reasoning)        │  │ │
-                         │  │  │  • mutation- │  │                   │  │ │
-  ┌──────────────┐        │  │  │    planner   │  └───────────────────┘  │ │
-  │    RAPIDS    │◄───────├──┤  │  • risk-     │                         │ │
-  │  Analytics   │        │  │  │    scorer    │  ┌───────────────────┐  │ │
-  │  (cuDF GPU)  │        │  │  └──────────────┘  │  Deploy Controller│  │ │
-  └──────────────┘        │  │                    │  (blue/green swap) │  │ │
-                         │  │                    └───────────────────┘  │ │
-                         │  └─────────────────────────────────────────┘ │
-                         │                                                │
-                         │  ┌──────────────────────────────────────────┐  │
-                         │  │    Target FastAPI App (attack surface)   │  │
-                         │  │    v1: vulnerable → vN: hardened         │  │
-                         │  └──────────────────────────────────────────┘  │
-                         └──────────────────────────────────────────────────┘
+
+### What happens during a defense cycle
+
+```text
+┌──────────────────────────┐
+│ Operator or mock IDS     │
+│ /defend  /simulate-alert │
+└────────────┬─────────────┘
+             │ attack context
+             ▼
+┌────────────────────────────────────────────────────────────────────┐
+│ ZeroWall Defense Loop                                              │
+│                                                                    │
+│  1. Replay baseline exploits against the managed FastAPI target    │
+│  2. Rank transforms: NeMo adapter* → NumPy → Triton* → fallback    │
+│  3. Build registered CST/validator variants (10 by default)        │
+│  4. Run pytest and optional Bandit checks in parallel              │
+│  5. Boot passing variants in temporary local subprocesses          │
+│  6. Replay predefined HTTP payloads and calculate risk             │
+└──────────────────────────────┬─────────────────────────────────────┘
+                               │
+                ┌──────────────┴──────────────┐
+                │                             │
+          no safe winner                 safe winner
+                │                             │
+                ▼                             ▼
+      ┌──────────────────┐       ┌──────────────────────────┐
+      │ Reject candidates│       │ Versioned atomic publish │
+      │ Target unchanged │       └────────────┬─────────────┘
+      └──────────────────┘                    │ managed reload
+                                              ▼
+                                 ┌──────────────────────────┐
+                                 │ Live acceptance gate     │
+                                 │ • exact source hash      │
+                                 │ • normal-request smoke   │
+                                 │ • exploit replay         │
+                                 └────────────┬─────────────┘
+                                              │
+                                  ┌───────────┴───────────┐
+                                  │                       │
+                                pass                    fail
+                                  │                       │
+                                  ▼                       ▼
+                         ┌────────────────┐      ┌─────────────────┐
+                         │ Confirm deploy │      │ Atomic rollback │
+                         └───────┬────────┘      └────────┬────────┘
+                                 └────────────┬───────────┘
+                                              ▼
+                           JSONL telemetry → cuDF*/pandas
+                                      → dashboards
+
+* Optional accelerated component; a local fallback is available.
 ```
 
 ---
@@ -86,34 +144,36 @@ Static defenses fail against adaptive attackers and manual patch cycles are slow
 ## NVIDIA Stack Usage <a name="nvidia-stack"></a>
 
 ### 1. 🖥️ Triton Inference Server
-**What we use it for:** Serving two small, dynamically batched policy endpoints:
-- `mutation-planner` — selects transform types for each defense cycle
-- `risk-scorer` — scores candidate confidence with batched inference
+**What it provides:** Two small, dynamically batched policy endpoints:
+- `mutation-planner` — a planner-cascade fallback for ranking transform types
+- `risk-scorer` — candidate confidence scoring when Triton is healthy
+
+The planner cascade tries an optional NeMo adapter, the checked-in NumPy policy, Triton, and finally a deterministic fallback. Risk scoring also falls back to a local formula, so CPU development runs do not require Triton.
 
 **Evidence in code:**
 - `inference/triton-model-repo/mutation-planner/config.pbtxt` + `1/model.py`
 - `inference/triton-model-repo/risk-scorer/config.pbtxt` + `1/model.py`
-- `inference/clients/triton_client.py` — all agent calls route through Triton HTTP API
-- Triton inference latency logged in telemetry and displayed on dashboard
+- `inference/clients/triton_client.py` — Triton HTTP v2 client
+- Planner- and risk-stage latencies are recorded in telemetry and displayed on the dashboards
 
 **Docker service:** `docker-compose.yml` → service `triton`
 
 ### 2. ⚡ vLLM (Local LLM Runtime — TRT-LLM upgrade path)
-**What we use it for:** Local GPU LLM inference for:
-- Mutation Agent narrative reasoning
-- Explanation Agent judge-facing summaries
+**What it provides:** Optional local GPU LLM inference for:
+- NeMo/LoRA transform ranking when a trained adapter is present
+- Explanation Agent judge-facing summaries, with a template fallback
 
-**Why vLLM and not TRT-LLM directly:** vLLM ships with an OpenAI-compatible API that integrates in minutes. The system is designed with a thin client layer (`inference/clients/vllm_client.py`) so swapping to TRT-LLM requires only pointing the base URL at a TRT-LLM server — both expose the same API. On a production DGX Spark with available time, TRT-LLM provides higher token/s throughput.
+**Why vLLM:** The included service exposes an OpenAI-compatible API and runs the configured local model. The clients are isolated behind a thin interface; another runtime, including a suitably configured TRT-LLM OpenAI-compatible server, can replace it. The repository does not include a trained NeMo adapter, so the default cascade skips that tier.
 
 **Evidence in code:**
 - `inference/clients/vllm_client.py`
 - `core/agents/explanation_agent.py` — calls vLLM for generation
-- Per-call latency logged and shown in benchmark output
+- LLM availability is reported by the CLI and operator dashboard
 
 **Docker service:** `docker-compose.yml` → service `vllm`
 
 ### 3. 🌊 RAPIDS cuDF
-**What we use it for:** GPU-accelerated telemetry analytics:
+**What it provides when installed:** GPU-accelerated telemetry analytics:
 - Exploit success rate before vs after defense cycles
 - Defense cycle latency statistics (mean, p95)
 - Candidate evaluation counts
@@ -121,37 +181,41 @@ Static defenses fail against adaptive attackers and manual patch cycles are slow
 - Inference latency breakdown per agent
 
 **Evidence in code:**
-- `core/telemetry/rapids_analytics.py` — primary cuDF path with pandas fallback
-- Uses `cudf.DataFrame` for all analytics operations on DGX Spark
+- `core/telemetry/rapids_analytics.py` — cuDF path with pandas fallback
+- Uses `cudf.DataFrame` when cuDF is installed and `RAPIDS_ENABLED=true`
 - Backend shown in dashboard ("cuDF-GPU" vs "pandas-CPU")
 - Analytics output feeds real-time Streamlit charts
+
+The portable `requirements.core.txt` and core Docker image install pandas, not
+cuDF. Use a RAPIDS-compatible DGX environment to activate the GPU path; otherwise
+the same analytics run through pandas.
 
 ---
 
 ## NVIDIA Requirement Mapping <a name="requirement-mapping"></a>
 
-### Why DGX Spark is the production-performance path
+### Why DGX Spark is the accelerated demo path
 | Reason | Detail |
 |--------|--------|
 | Triton model serving | Reproducible model lifecycle and dynamic batching; the current tiny NumPy policies run on CPU |
-| vLLM LLM inference | Requires GPU; float16 models won't fit in CPU RAM |
-| RAPIDS cuDF | Uses CUDA for production analytics, with a pandas development fallback |
+| vLLM LLM inference | The included vLLM container is configured for NVIDIA GPU execution |
+| RAPIDS cuDF | Uses CUDA for analytics when installed, with a pandas fallback |
 | Local LLM reasoning | vLLM runs the optional explanation/planner LLM locally on the DGX GPU |
 | Parallel evaluation | Candidate tests and isolated HTTP replay benefit from DGX capacity but also run in CPU development mode |
 
-### NVIDIA Components Used
+### NVIDIA Components Integrated
 | Component | Role | Evidence |
 |-----------|------|----------|
 | Triton Inference Server | Multi-model serving | `inference/triton-model-repo/` |
 | vLLM | Local LLM inference (TRT-LLM path) | `inference/clients/vllm_client.py` |
-| RAPIDS cuDF | GPU DataFrame analytics | `core/telemetry/rapids_analytics.py` |
+| RAPIDS cuDF | Optional GPU DataFrame analytics | `core/telemetry/rapids_analytics.py` |
 
 ### Why this is an Advanced AI System
 - **Multi-agent pipeline**: 5 specialized agents (Mutation, Exploit, Verifier, Risk, Explanation)
 - **Not a chatbot**: No human in the loop during defense cycle
-- **Autonomous decision-making**: Risk Agent recommends deploy/reject/rollback
-- **Safe code generation**: Deterministic AST transforms controlled by AI model output
-- **Continuous adaptation**: Each cycle produces a different hardened variant
+- **Autonomous decision-making**: Risk Agent recommends deploy/reject; the orchestrator rolls back a published candidate when its live gate fails
+- **Constrained code changes**: Models rank registered deterministic CST transforms and validator guards
+- **Variant generation**: Candidate layouts vary by transform and seed, although the selected winner may repeat
 
 ---
 
@@ -159,28 +223,30 @@ Static defenses fail against adaptive attackers and manual patch cycles are slow
 
 ### Prerequisites
 ```bash
-# Clone and setup
+# Copy configuration; edit only the services you intend to enable.
 cp .env.example .env
-# Edit .env: set HF_TOKEN, VLLM_MODEL, GPU counts
+# Optional examples: VLLM_MODEL, VLLM_TP_SIZE, and HF_TOKEN for gated models.
 
-# Install local deps (for running outside Docker)
+# For standalone Python development:
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.core.txt
-cd apps/target-fastapi && pip install -r requirements.txt && cd ../..
+pip install -r apps/target-fastapi/requirements.txt
 ```
 
 ### Full Docker Demo (DGX Spark)
 ```bash
 # Start all services
-docker-compose up -d
+docker compose up -d --build
 
-# Wait for health checks (Triton takes ~30s)
-docker-compose ps
+# Watch service health; model startup time depends on the selected vLLM model.
+docker compose ps
 
 # Run the demo flow
 bash scripts/run_demo.sh
 
-# Open dashboard
-open http://localhost:8501
+# Visit the Streamlit dashboard at http://localhost:8501
+# or the Next.js operator dashboard at http://localhost:3000
 ```
 
 ### Step-by-Step Manual Demo
@@ -197,8 +263,7 @@ bash scripts/seed_attack.sh
 
 # 4. Open OpenClaw CLI (interactive)
 python -m core.orchestrator.openclaw_cli interactive
-# Then type: /simulate-alert
-# Then type: /defend
+# Then type either /simulate-alert (which triggers defense) or /defend
 # Then type: /status
 
 # 5. Open dashboard
@@ -210,7 +275,6 @@ streamlit run dashboard/streamlit_app.py
 # Includes target contracts, every transform, real live hot-swap, telemetry,
 # and an injected post-deploy failure that must roll back.
 pytest -q
-# Expected: 36 passed
 ```
 
 ### OpenClaw Commands Reference
@@ -224,9 +288,9 @@ pytest -q
 
 ---
 
-## Benchmark Evidence <a name="benchmark"></a>
+## Benchmarking <a name="benchmark"></a>
 
-Run the benchmark to produce hard numbers:
+Run the benchmark against the active local target:
 
 ```bash
 bash scripts/run_benchmark.sh
@@ -238,17 +302,12 @@ bash scripts/run_benchmark.sh
 - `artifacts/benchmark/benchmark_summary.csv`
 - Rich terminal table printed automatically
 
-**Expected metrics on DGX Spark:**
-
-| Metric | Expected (DGX Spark) | Notes |
-|--------|----------------------|-------|
-| Mutation candidates / cycle | 10 | Configurable 8–20 |
-| Defense cycle latency | 5–15s | Depends on test suite size |
-| Exploit replays / cycle | 10×5 = 50 | 10 candidates × 5 payloads |
-| Triton inference latency | <50ms | Per model call |
-| vLLM inference latency | <2s | Explanation generation |
-| Burst throughput | 100+ rps | With cuDF analytics |
-| Exploit success rate delta | >80% reduction | Vulnerable → hardened |
+The report includes request throughput, average and p95 latency, exploit success
+before and after defense, total defense-cycle time, retained candidate count,
+planner/risk-stage latency, and the active analytics backend. Candidate count can
+be lower than the configured value when duplicate or invalid variants are removed.
+Results depend on hardware, model, concurrency, and warm-up state; this repository
+does not claim canonical DGX Spark performance numbers.
 
 ---
 
@@ -272,17 +331,17 @@ For live demo evidence, capture and place in `artifacts/`:
 ├── apps/target-fastapi/        # Vulnerable demo FastAPI app
 │   ├── main.py                 # 3 simulated vulnerable endpoints
 │   ├── managed_runner.py       # Serves/reloads the managed deployment slot
-│   ├── test_app.py             # 25+ unit tests (verifier uses these)
+│   ├── test_app.py             # Target contract tests used by the verifier
 │   ├── requirements.txt
 │   └── Dockerfile
 ├── core/
 │   ├── agents/                 # 5 ZeroWall agents
-│   │   ├── mutation_agent.py   # Generates 8–20 candidate plans
+│   │   ├── mutation_agent.py   # Generates candidate plans (10 by default)
 │   │   ├── exploit_agent.py    # Replays known attack payloads
 │   │   ├── verifier_agent.py   # Runs pytest + bandit
 │   │   ├── risk_agent.py       # Scores + recommends action
 │   │   └── explanation_agent.py # Judge-facing summaries
-│   ├── transforms/             # Safe deterministic AST transforms
+│   ├── transforms/             # Deterministic CST transforms and guards
 │   │   ├── base.py             # Transform registry
 │   │   ├── rename_identifiers.py
 │   │   ├── reorder_blocks.py
@@ -293,7 +352,7 @@ For live demo evidence, capture and place in `artifacts/`:
 │   │   ├── defense_loop.py     # Main multi-agent coordinator
 │   │   └── openclaw_cli.py     # OpenClaw command interface
 │   ├── deploy/
-│   │   └── controller.py       # Blue/green deploy + rollback
+│   │   └── controller.py       # Versioned atomic deploy + rollback
 │   ├── telemetry/
 │   │   ├── collector.py        # Event collection → JSONL
 │   │   └── rapids_analytics.py # cuDF GPU analytics
@@ -304,15 +363,18 @@ For live demo evidence, capture and place in `artifacts/`:
 │   │   ├── mutation-planner/   # Transform type selector model
 │   │   └── risk-scorer/        # Candidate risk scoring model
 │   └── clients/
-│       ├── triton_client.py    # Triton HTTP v2 client
-│       └── vllm_client.py      # vLLM OpenAI-compatible client
+│       ├── triton_client.py       # Triton HTTP v2 client
+│       ├── vllm_client.py         # vLLM completion client
+│       └── nemo_planner_client.py # Optional adapter planner client
 ├── dashboard/
 │   └── streamlit_app.py        # Judge-facing metrics dashboard
+├── frontend/                    # Next.js operator dashboard
 ├── scripts/
 │   ├── run_demo.sh             # End-to-end demo flow
 │   ├── run_benchmark.sh        # Benchmark runner
 │   └── seed_attack.sh          # Seed known exploit payloads
-├── docker-compose.yml          # All services: target, triton, vllm, core, dashboard
+├── tests/                       # Transform and live deployment integration tests
+├── docker-compose.yml          # Target, inference, core, and two dashboards
 ├── Dockerfile.core             # ZeroWall core engine container
 ├── requirements.core.txt
 └── .env.example
@@ -329,13 +391,13 @@ See [SECURITY.md](SECURITY.md) for safe-testing boundaries and private vulnerabi
 > ZeroWall is built for safe, controlled demonstration purposes only.
 >
 > - The "vulnerable" endpoints do NOT expose real system resources, execute real commands, or perform any harmful operations
-> - All simulated vulnerabilities are sandboxed in an in-memory dictionary
-> - Exploit payloads target ONLY the local demo FastAPI container — no external network probing
+> - Simulated file, command, and query behavior uses in-memory fixtures rather than host resources
+> - Bundled exploit commands default to the local demo target and perform no network scanning
 > - No real offensive tooling is included in this project
 > - The deploy controller only writes the local, versioned demo deployment slot
 > - All "exploits" are pre-defined, non-harmful HTTP requests that trigger simulated response patterns
 
-This project demonstrates an *MTD-inspired adaptive hardening pipeline*; it is not a general-purpose autonomous patcher. Real deployment would use actual vulnerability detection, but safety is the top priority for this demonstration.
+The CLI accepts a configurable target URL; do not point it at systems you do not own and control. This project demonstrates an *MTD-inspired adaptive-hardening pipeline* and is not a general-purpose detector or autonomous patcher. See [SECURITY.md](SECURITY.md) for the full boundary.
 
 ---
 
